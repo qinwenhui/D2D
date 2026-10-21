@@ -27,7 +27,8 @@
 //! # 分片
 //!
 //! 一条 SQL 仍由一个分片执行；分片谓词、列裁剪、LIMIT 全部走 SQL 下推。
-//! `FlightInfo` 可以返回多个 endpoint（多个 scan range），本模块会逐个取完。
+//! `FlightInfo` 返回的 endpoint 数量由服务端拓扑/扫描范围决定（单机 Doris 可能只有
+//! 1 个，多 BE 可能有多个）；本模块**按实际数量并发取完**，不写死 BE 个数。
 
 use crate::config::DorisConnection;
 use crate::source::sql::DorisSqlBuilder;
@@ -35,6 +36,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_flight::sql::client::FlightSqlServiceClient;
 use d2d_connector::QueryConfig;
 use d2d_core::{D2DError, D2DResult};
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -139,36 +141,36 @@ impl FlightSource {
         }
         started.store(true, Ordering::Relaxed);
 
-        for (i, ep) in info.endpoint.iter().enumerate() {
-            let ticket = ep.ticket.clone().ok_or_else(|| {
+        // endpoint 数量由拓扑/扫描范围决定：单机 Doris 通常 1 个，多 BE 可能有多个。
+        // **不写死 3**；每个 endpoint 一个并发任务，有几个取几个。
+        let mut jobs = Vec::with_capacity(info.endpoint.len());
+        for (i, ep) in info.endpoint.into_iter().enumerate() {
+            let ticket = ep.ticket.ok_or_else(|| {
                 D2DError::external(
                     "doris-flight",
                     format!("endpoint {i} 没有 ticket，无法取数"),
                 )
             })?;
-            let url = ep
-                .location
-                .first()
-                .map(|l| normalize_uri(&l.uri))
-                .unwrap_or_else(|| fe_url.clone());
+            let locations: Vec<String> =
+                ep.location.iter().map(|l| normalize_uri(&l.uri)).collect();
+            jobs.push((i, ticket, locations));
+        }
 
-            // endpoint 的 location 通常是 BE 的 Flight 端口；按它建立新连接
-            let mut client = connect(&url, &self.user, &self.password).await?;
-            let mut stream = client
-                .do_get(ticket)
-                .await
-                .map_err(|e| flight_err(format!("do_get（{url}）"), e))?;
-
-            while let Some(item) = stream.next().await {
-                let batch = item.map_err(|e| {
-                    D2DError::external("doris-flight", format!("读取 Flight 流失败: {e}"))
-                })?;
-                let n = batch.num_rows();
-                if tx.send(Ok(batch)).await.is_err() {
-                    return Ok(()); // 下游断开
-                }
-                rows_read.fetch_add(n as u64, Ordering::Relaxed);
-            }
+        let mut futs = FuturesUnordered::new();
+        for (i, ticket, locations) in jobs {
+            futs.push(fetch_endpoint(
+                i,
+                ticket,
+                locations,
+                fe_url.clone(),
+                self.user.clone(),
+                self.password.clone(),
+                tx.clone(),
+                rows_read,
+            ));
+        }
+        while let Some(res) = futs.next().await {
+            res?;
         }
         Ok(())
     }
@@ -186,6 +188,66 @@ impl FlightSource {
             format!("所有 FE 的 Flight SQL 都连不上: {}", errors.join("; ")),
         ))
     }
+}
+
+/// 取一个 endpoint：按它自己的 location 连 BE；location 不可用时回退到 FE。
+///
+/// endpoint 数量由服务端拓扑决定，**不做固定假设**（单机 Doris 可能只有 1 个）。
+#[allow(clippy::too_many_arguments)]
+async fn fetch_endpoint(
+    index: usize,
+    ticket: arrow_flight::Ticket,
+    locations: Vec<String>,
+    fe_url: String,
+    user: String,
+    password: String,
+    tx: mpsc::Sender<D2DResult<arrow::record_batch::RecordBatch>>,
+    rows_read: &AtomicU64,
+) -> D2DResult<()> {
+    let mut urls = locations;
+    if urls.is_empty() {
+        urls.push(fe_url.clone());
+    }
+    // 某些部署里客户端只能连 FE；BE location 失败时再试 FE（服务端不接受时
+    // 会返回明确错误，不会静默成功）。
+    if !urls.iter().any(|u| u == &fe_url) {
+        urls.push(fe_url);
+    }
+
+    let mut last_err = None;
+    for url in urls {
+        let mut client = match connect(&url, &user, &password).await {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let mut stream = match client.do_get(ticket.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = Some(flight_err(format!("do_get（{url}）"), e));
+                continue;
+            }
+        };
+        while let Some(item) = stream.next().await {
+            let batch = item.map_err(|e| {
+                D2DError::external("doris-flight", format!("读取 Flight 流失败: {e}"))
+            })?;
+            let n = batch.num_rows();
+            if tx.send(Ok(batch)).await.is_err() {
+                return Ok(()); // 下游断开
+            }
+            rows_read.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        return Ok(());
+    }
+    Err(last_err.unwrap_or_else(|| {
+        D2DError::external(
+            "doris-flight",
+            format!("endpoint {index} 没有可用的 location"),
+        )
+    }))
 }
 
 async fn connect(
