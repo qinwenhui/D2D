@@ -242,8 +242,7 @@ impl PoolConfig {
         // 真写一个探针文件再删掉：`create_dir_all` 成功不代表**目录可写**
         // （只读挂载、ACL 拒绝都会在这一步才现形）。
         let probe = dir.join(format!(".d2d-spill-probe-{}", std::process::id()));
-        let write_ok = std::fs::write(&probe, b"d2d")
-            .and_then(|_| std::fs::remove_file(&probe));
+        let write_ok = std::fs::write(&probe, b"d2d").and_then(|_| std::fs::remove_file(&probe));
         if let Err(e) = write_ok {
             let _ = std::fs::remove_file(&probe);
             return Err(D2DError::config(format!(
@@ -292,11 +291,16 @@ fn sweep_stale_spill_files(dir: &Path, name: &str) -> usize {
     let mut n = 0;
     for e in entries.flatten() {
         let fname = e.file_name();
-        let Some(fname) = fname.to_str() else { continue };
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
         let Some(rest) = fname.strip_prefix(&prefix) else {
             continue;
         };
-        let Some(pid) = rest.strip_suffix(".bin").and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(pid) = rest
+            .strip_suffix(".bin")
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
             continue;
         };
         if pid == std::process::id() || pid_is_alive(pid) {
@@ -374,20 +378,17 @@ impl SpillFile {
             Some(d) => d.to_path_buf(),
             None => std::env::temp_dir(),
         };
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            D2DError::config(format!("spill 目录 {} 不可用: {}", dir.display(), e))
-        })?;
-        let path = dir.join(format!(
-            "d2d-spill-{}-{}.bin",
-            name,
-            std::process::id()
-        ));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| D2DError::config(format!("spill 目录 {} 不可用: {}", dir.display(), e)))?;
+        let path = dir.join(format!("d2d-spill-{}-{}.bin", name, std::process::id()));
         let wr = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&path)
-            .map_err(|e| D2DError::config(format!("建 spill 文件 {} 失败: {}", path.display(), e)))?;
+            .map_err(|e| {
+                D2DError::config(format!("建 spill 文件 {} 失败: {}", path.display(), e))
+            })?;
         let rd = OpenOptions::new().read(true).open(&path).map_err(|e| {
             D2DError::config(format!("打开 spill 文件 {} 失败: {}", path.display(), e))
         })?;
@@ -403,7 +404,10 @@ impl SpillFile {
     /// 追加一条记录，返回 `(offset, len)`
     fn append(&mut self, item: &dyn Fn(&mut dyn Write) -> D2DResult<()>) -> D2DResult<(u64, u64)> {
         let offset = self.len;
-        let mut counter = ByteCounter { inner: &mut self.wr, n: 0 };
+        let mut counter = ByteCounter {
+            inner: &mut self.wr,
+            n: 0,
+        };
         item(&mut counter)?;
         let n = counter.n;
         self.len += n;
@@ -507,6 +511,8 @@ struct Inner<T> {
 /// mem   的可用额度    ==  容量 - 队列里占的内存
 /// ```
 ///
+/// 容量本身是 usize，可以超过 4GiB；只有**单个元素**的 acquire 受 u32 限制。
+///
 /// 两者都在 `inner` 那把锁**里面**一起增减，所以不变量永远成立 --
 /// “拿到一个 items 凭证”就等于“队里一定有一件货”。
 ///
@@ -525,7 +531,7 @@ pub struct DataPool<T> {
     inner: Mutex<Inner<T>>,
     /// 队列长度（入队 `add_permits(1)`，出队消耗一个）
     items: Arc<Semaphore>,
-    /// 剩余内存额度（入队按元素字节数 `acquire_many`，出队原样归还）
+    /// 剩余内存额度（按字节计；容量是 usize，可以超过 4GiB）
     mem: Arc<Semaphore>,
     peak: AtomicUsize,
     spilled_items: AtomicU64,
@@ -548,10 +554,9 @@ fn too_big_err(name: &str, bytes: usize, cap: usize) -> D2DError {
 
 impl<T: SpillItem> DataPool<T> {
     pub fn new(cfg: PoolConfig) -> Arc<Self> {
-        assert!(
-            cfg.capacity_bytes <= u32::MAX as usize,
-            "池容量超过 4 GiB 上限（信号量按 u32 计额度）"
-        );
+        // `Semaphore::new` 的容量是 usize —— 池容量本身可以超过 4GiB。
+        // 只有单次 `acquire_many` 是 u32，所以限制的是**单个元素**（见 push），
+        // 不是池容量。旧版在 4GiB 处硬 assert 是过度保守。
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 slots: VecDeque::new(),
@@ -604,7 +609,15 @@ impl<T: SpillItem> DataPool<T> {
         if bytes > self.cfg.capacity_bytes {
             return Err(too_big_err(self.cfg.name, bytes, self.cfg.capacity_bytes));
         }
-        let n = bytes as u32;
+        // 单次 acquire_many 是 u32；单个元素超过 4GiB 必须拆批，不能静默截断
+        let n = u32::try_from(bytes).map_err(|_| {
+            D2DError::internal(format!(
+                "{}池：单个元素 {} MB 超过单次信号量 acquire 的 u32 上限（4 GiB）；\
+                 请把该批拆小（池容量本身可以超过 4GiB）",
+                self.cfg.name,
+                bytes / 1048576
+            ))
+        })?;
 
         // ① 争取内存额度
         let permit = match self.cfg.overflow {
@@ -729,10 +742,7 @@ impl<T: SpillItem> DataPool<T> {
             );
         }
         self.mem.clone().acquire_many_owned(n).await.map_err(|_| {
-            D2DError::internal(format!(
-                "{}池已关闭，等待额度的写入被中止",
-                self.cfg.name
-            ))
+            D2DError::internal(format!("{}池已关闭，等待额度的写入被中止", self.cfg.name))
         })
     }
 
@@ -840,11 +850,7 @@ impl<T: SpillItem> DataPool<T> {
 
     pub fn stats(&self) -> PoolStats {
         let g = self.inner.lock().unwrap();
-        let mem = g
-            .slots
-            .iter()
-            .filter(|s| matches!(s, Slot::Mem(_)))
-            .count();
+        let mem = g.slots.iter().filter(|s| matches!(s, Slot::Mem(_))).count();
         PoolStats {
             name: self.cfg.name.to_string(),
             peak_bytes: self.peak.load(Ordering::Relaxed),
@@ -903,15 +909,32 @@ mod tests {
         fn spill_to(&self, w: &mut dyn Write) -> D2DResult<()> {
             write_u64(w, self.id as u64)?;
             write_u64(w, self.bytes.len() as u64)?;
-            w.write_all(&self.bytes).map_err(|e| D2DError::internal(e.to_string()))
+            w.write_all(&self.bytes)
+                .map_err(|e| D2DError::internal(e.to_string()))
         }
         fn unspill_from(r: &mut dyn Read) -> D2DResult<Self> {
             let id = read_u64(r)? as u32;
             let len = read_u64(r)? as usize;
             let mut bytes = vec![0u8; len];
-            r.read_exact(&mut bytes).map_err(|e| D2DError::internal(e.to_string()))?;
+            r.read_exact(&mut bytes)
+                .map_err(|e| D2DError::internal(e.to_string()))?;
             Ok(Self { id, bytes })
         }
+    }
+
+    /// 容量超过 4GiB 不再是硬上限：额度单位自动放大，小容量仍逐字节
+    #[cfg(target_pointer_width = "64")]
+    #[tokio::test]
+    async fn test_pool_capacity_above_4gib_is_allowed() {
+        let cap = 5usize * 1024 * 1024 * 1024;
+        let p = DataPool::<Blob>::new(
+            PoolConfig::new("t", cap).with_overflow(PoolOverflow::Backpressure),
+        );
+        assert_eq!(p.capacity_bytes(), cap);
+        p.push(Blob::new(1, 3 * KB)).await.unwrap();
+        let got = p.pop().await.unwrap().unwrap();
+        assert_eq!(got.id, 1);
+        assert_eq!(p.used_bytes(), 0);
     }
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -1048,7 +1071,11 @@ mod tests {
             .expect("腾出空间后应当放行")
             .unwrap()
             .unwrap();
-        assert_eq!(p.stats().spilled_items, 3, "放行的这一条该进内存，不该再写盘");
+        assert_eq!(
+            p.stats().spilled_items,
+            3,
+            "放行的这一条该进内存，不该再写盘"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1063,7 +1090,11 @@ mod tests {
         }
         p.close();
         for i in 0..3 {
-            assert_eq!(p.pop().await.unwrap().unwrap().id, i, "关闭不得丢掉已排队的数据");
+            assert_eq!(
+                p.pop().await.unwrap().unwrap().id,
+                i,
+                "关闭不得丢掉已排队的数据"
+            );
         }
         assert!(p.pop().await.is_none(), "排空且关闭后必须返回 None");
     }
@@ -1131,10 +1162,17 @@ mod tests {
         for i in 0..20 {
             assert_eq!(p.pop().await.unwrap().unwrap().id, i);
         }
-        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
         assert_eq!(files.len(), 1, "spill 文件应当还在（池还活着）");
         let size = files[0].metadata().unwrap().len();
-        assert_eq!(size, 0, "磁盘区排空后文件应当被截断回收，实际 {} 字节", size);
+        assert_eq!(
+            size, 0,
+            "磁盘区排空后文件应当被截断回收，实际 {} 字节",
+            size
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1345,7 +1383,8 @@ mod tests {
         }
         fn unspill_from(r: &mut dyn Read) -> D2DResult<Self> {
             let mut b = Vec::new();
-            r.read_to_end(&mut b).map_err(|e| D2DError::internal(e.to_string()))?;
+            r.read_to_end(&mut b)
+                .map_err(|e| D2DError::internal(e.to_string()))?;
             Ok(Self { real: b.len() })
         }
     }
@@ -1426,7 +1465,11 @@ mod tests {
         assert!(blocked.is_err(), "越限的那件应当退回背压");
         let st = p.stats();
         assert_eq!(st.spilled_items, 2, "越限那条不该算溢出成功");
-        assert!(st.spilled_bytes <= 200 * KB as u64, "越限了：{}", st.spilled_bytes);
+        assert!(
+            st.spilled_bytes <= 200 * KB as u64,
+            "越限了：{}",
+            st.spilled_bytes
+        );
 
         // 前面两件**读回来还是原样** —— 回滚没有把它们的字节一起截掉
         assert_eq!(p.pop().await.unwrap().unwrap().real, 32 * KB);
@@ -1542,7 +1585,11 @@ mod tests {
             let cfg = PoolConfig::new("source", KB)
                 .with_overflow(ov)
                 .with_spill_dir(blocker.join("under-a-file"));
-            assert!(cfg.validate_spill_dir().is_ok(), "{:?} 不该校验 spill_dir", ov);
+            assert!(
+                cfg.validate_spill_dir().is_ok(),
+                "{:?} 不该校验 spill_dir",
+                ov
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
