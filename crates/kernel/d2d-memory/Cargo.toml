@@ -1,0 +1,10 @@
+[package]
+name = "d2d-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+tokio = { workspace = true }

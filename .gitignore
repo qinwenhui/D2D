@@ -1,0 +1,31 @@
+# Build output
+/target/
+**/target/
+
+# Internal workspace artifacts (kept on disk, never committed)
+/.drivers/
+/.workbuddy-ai/
+/spike/
+/测试/
+/examples/
+/scripts/
+
+# Internal development docs, reports, screenshots, logs
+/*.md
+/*.pdf
+/*.html
+/*.png
+/*.jpg
+/*.jpeg
+/*.log
+
+# Per-crate operational examples (environment-specific)
+crates/**/examples/
+
+# Local configuration and secrets
+.env
+.env.*
+*.local.yaml
+*.local.yml
+.idea/
+.vscode/

@@ -1,0 +1,18 @@
+[package]
+name = "d2d-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+arrow = { workspace = true }
+serde = { workspace = true }
+# text_batch：文本按逻辑类型解析成 Arrow 批次。时间要 chrono 解析，
+# 字符串列要能按非 UTF-8 编码解码（dmfldr 的 CHARACTER_CODE）。
+chrono = { workspace = true }
+encoding_rs = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

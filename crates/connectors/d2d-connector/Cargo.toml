@@ -1,0 +1,26 @@
+[package]
+name = "d2d-connector"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-memory = { workspace = true }
+# 类型适配器注册表要按名字给出 Box<dyn TypeAdapter>（契约层转发这个界面）
+d2d-types = { workspace = true }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+# 分区切分数学需要真实的时间类型（日期不能按字符串均分），见 partition.rs
+chrono = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+tempfile = "3.10"
+# 只有测试用（生产代码不碰运行时）—— 闸门是 tokio 信号量，验证它"真的会咬人"要并发
+tokio = { workspace = true }

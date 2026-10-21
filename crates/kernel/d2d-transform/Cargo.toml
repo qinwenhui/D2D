@@ -1,0 +1,16 @@
+[package]
+name = "d2d-transform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+arrow = { workspace = true }
+# 算子的声明式描述（YAML ↔ 代码的唯一桥梁），见 src/spec.rs
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

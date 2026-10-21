@@ -1,0 +1,23 @@
+[package]
+name = "d2d-execution"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-memory = { workspace = true }
+d2d-connector = { workspace = true }
+d2d-transform = { workspace = true }
+arrow = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+memchr = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

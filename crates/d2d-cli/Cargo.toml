@@ -1,0 +1,30 @@
+[package]
+name = "d2d-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "d2d"
+path = "src/main.rs"
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-types = { workspace = true }
+
+d2d-connector = { workspace = true }
+d2d-transform = { workspace = true }
+d2d-execution = { workspace = true }
+d2d-dameng = { workspace = true }
+d2d-doris = { workspace = true }
+d2d-mysql = { workspace = true }
+d2d-postgres = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

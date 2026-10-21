@@ -1,0 +1,21 @@
+[package]
+name = "d2d-mysql"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-connector = { workspace = true }
+d2d-types = { workspace = true }
+arrow = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+mysql_async = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

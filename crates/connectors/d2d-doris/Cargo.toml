@@ -1,0 +1,30 @@
+[package]
+name = "d2d-doris"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-connector = { workspace = true }
+# src/types.rs 的类型适配器要实现 d2d_types::TypeAdapter
+d2d-types = { workspace = true }
+arrow = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+# 直通面零拷贝移交载荷：`Bytes::from(Vec<u8>)` 只是换持有者，不搬数据
+bytes = { workspace = true }
+# 读方向（Doris → X）：走 FE 的 MySQL 协议口
+mysql_async = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+# json 序列化要把 Arrow 的时间值渲染成 Doris 认的字符串
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

@@ -1,0 +1,35 @@
+[package]
+name = "d2d-dameng"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-connector = { workspace = true }
+d2d-types = { workspace = true }
+arrow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+encoding_rs = { workspace = true }
+memchr = { workspace = true }
+uuid = { workspace = true }
+# DPI 读取路径（method: dpi）。**运行期**加载达梦的 libdmdpi.so / dmdpi.dll：
+# 库缺失只影响选了 dpi 的配置，不会让整个连接器构建/启动依赖达梦客户端。
+libloading = "0.8"
+# ODBC 读取路径（method: odbc）。阻塞 API，调用方必须 spawn_blocking。
+#
+# 关掉默认特性、改用 odbc_version_3_5：默认要 ODBC 3.80，而 CentOS 7 自带的
+# unixODBC 2.3.1 只到 3.52 —— 挂上去会在**建立环境**那一刻就失败
+# （"does not seem to support ODBC API version 3.80"）。
+odbc-api = { version = "29", default-features = false, features = ["odbc_version_3_5"] }
+
+[dev-dependencies]
+tempfile = "3.10"

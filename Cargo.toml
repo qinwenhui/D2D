@@ -1,0 +1,97 @@
+# 目录分两层：
+#   kernel/      引擎本体 —— 与"连哪个库"无关，换库不动它
+#   connectors/  一个数据库一个目录 —— 加连接器 = **新增一个目录**，不是新增两个同级 crate
+[workspace]
+members = [
+    # ── 内核 ──
+    "crates/kernel/d2d-core",
+    "crates/kernel/d2d-types",
+    "crates/kernel/d2d-memory",
+    "crates/kernel/d2d-transform",
+    "crates/kernel/d2d-execution",
+    # ── 连接器契约层（不是连接器本身）──
+    "crates/connectors/d2d-connector",
+    # ── 连接器 ──
+    "crates/connectors/d2d-dameng",
+    "crates/connectors/d2d-doris",
+    "crates/connectors/d2d-mysql",
+    "crates/connectors/d2d-postgres",
+    # ── 入口 ──
+    "crates/d2d-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["D2D Team"]
+license = "MIT OR Apache-2.0"
+# Arrow 60 要求 1.88（53 只要求 1.70）。基准机是 Rust 1.99。
+rust-version = "1.88"
+
+[workspace.dependencies]
+# Arrow。只声明这一个 —— 它已经把 arrow-array / arrow-schema / arrow-ipc /
+# arrow-cast / arrow-select 都再导出了，而全仓的引用路径都是 `arrow::xxx::`
+# （例如散落的 `arrow_array` / `arrow_ipc` 路径一律为 0 处）。
+# 单独再列一堆门面子 crate 只会让人以为它们是分开用的。
+arrow = { version = "60.0", features = ["ipc"] }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# MySQL 协议（Doris Source 读方向：Doris FE 的只读口就是 MySQL 协议）
+#
+# 为什么是它而不是 Doris 的 HTTP API：REST 查询口在 Doris 2.x 已不保证存在，
+# 而且拉不了大结果集、没有游标。MySQL 协议是业界读 Doris 的标准做法，
+# 也顺带把"按列取元数据"（类型/精度/是否无符号）一起给了。
+mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
+
+# PostgreSQL 协议（读与写）
+tokio-postgres = "0.7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Utilities
+bytes = "1.7"
+futures = "0.3"
+async-trait = "0.1"
+uuid = { version = "1.10", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio-stream = "0.1"
+
+# 编码 / 快速字节搜索（dmfldr 文本解析层）
+encoding_rs = "0.8"
+memchr = "2.7"
+
+# Workspace crates —— 内核
+d2d-core = { path = "crates/kernel/d2d-core" }
+d2d-types = { path = "crates/kernel/d2d-types" }
+d2d-memory = { path = "crates/kernel/d2d-memory" }
+d2d-transform = { path = "crates/kernel/d2d-transform" }
+d2d-execution = { path = "crates/kernel/d2d-execution" }
+
+# 连接器契约层
+d2d-connector = { path = "crates/connectors/d2d-connector" }
+
+# 连接器（一个数据库一个 crate；类型适配器在各自的 `src/types.rs` 里，不再是独立 crate）
+d2d-dameng = { path = "crates/connectors/d2d-dameng" }
+d2d-doris = { path = "crates/connectors/d2d-doris" }
+d2d-mysql = { path = "crates/connectors/d2d-mysql" }
+d2d-postgres = { path = "crates/connectors/d2d-postgres" }
