@@ -389,22 +389,25 @@ fn render_data(
     null_str: &str,
     charset: CharacterCode,
 ) -> D2DResult<String> {
-    use crate::sink::method::odbc::arrow_value_to_text;
+    use crate::sink::method::odbc::collect_texts;
 
     let ncols = batch.num_columns();
-    let mut out = String::with_capacity(batch.num_rows() * ncols * 8);
-    for r in 0..batch.num_rows() {
+    let rows = batch.num_rows();
+    // 与 odbc/dpi 共用同一份按列缓存时区的转换（Flight 的 Timestamp 带 IANA 时区）
+    let texts = collect_texts(batch, 0, rows)?;
+    let mut out = String::with_capacity(rows * ncols * 8);
+    for r in 0..rows {
         for c in 0..ncols {
             if c > 0 {
                 out.push_str(sep);
             }
-            match arrow_value_to_text(batch.column(c).as_ref(), r)? {
+            match &texts[r * ncols + c] {
                 None => out.push_str(null_str),
                 Some(v) => {
                     if v.contains(sep) {
                         return Err(collision_err(
                             &batch.schema().field(c).name().clone(),
-                            &v,
+                            v,
                             sep,
                             "列分隔符",
                             "sink.properties.dmfldr.field_seperator",
@@ -413,22 +416,22 @@ fn render_data(
                     if v.contains('\n') || v.contains('\r') {
                         return Err(collision_err(
                             &batch.schema().field(c).name().clone(),
-                            &v,
+                            v,
                             "换行",
                             "换行符",
                             "（dmfldr 按 \\n 切行，值里不能带换行）",
                         ));
                     }
-                    if v == null_str {
+                    if v.as_str() == null_str {
                         return Err(collision_err(
                             &batch.schema().field(c).name().clone(),
-                            &v,
+                            v,
                             null_str,
                             "空值字面量",
                             "sink.properties.dmfldr.null_str",
                         ));
                     }
-                    out.push_str(&v);
+                    out.push_str(v);
                 }
             }
         }
