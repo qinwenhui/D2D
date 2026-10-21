@@ -125,6 +125,8 @@ mod tests {
             http_port: 18030,
             be_http_port: 18040,
             query_port: 19030,
+            flight_port: 8070,
+            flight_tls: false,
             load_targets: vec![],
         }
     }

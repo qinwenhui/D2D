@@ -138,7 +138,7 @@ fn insert_batch(ctx: &WriteContext, batch: arrow::array::RecordBatch) -> D2DResu
         let sql = build_multi_row_insert(&ctx.qualified_table(), &columns, n);
         // 值一律先落成字符串：`&[Box<dyn InputParameter>]` 按序绑到 `?` 1..N，
         // 而字符串要在 execute 返回前一直活着 —— 所以 params 借 local 的 `texts`。
-        let texts = collect_texts(&batch, done, n);
+        let texts = collect_texts(&batch, done, n)?;
         // `Option<&str>` 一次到位：`Some` 绑文本、`None` 绑 SQL NULL。
         // 借的是 local 的 `texts`，在 `execute` 返回前一直活着 ✓
         let params: Vec<Box<dyn InputParameter>> = texts
@@ -179,68 +179,154 @@ pub(crate) fn collect_texts(
     batch: &arrow::array::RecordBatch,
     start: usize,
     rows: usize,
-) -> Vec<Option<String>> {
+) -> D2DResult<Vec<Option<String>>> {
     let ncols = batch.num_columns();
     let mut out = Vec::with_capacity(rows * ncols);
     for r in start..start + rows {
         for c in 0..ncols {
-            out.push(arrow_value_to_text(batch.column(c).as_ref(), r));
+            out.push(arrow_value_to_text(batch.column(c).as_ref(), r)?);
         }
     }
-    out
+    Ok(out)
 }
 
-/// 一个 Arrow 值 → 达梦能按目标列类型解释的文本；`None` = NULL
+/// 一个 Arrow 值 → 达梦能按目标列类型解释的文本；`Ok(None)` = SQL NULL
 ///
 /// **时间/日期必须显式格式化**：Arrow 的 Display 对 `Timestamp` 打出
 /// `2026-10-16T18:19:13`（带 `T`），达梦不认这个形态。
-pub fn arrow_value_to_text(col: &dyn arrow::array::Array, row: usize) -> Option<String> {
+///
+/// 带时区的 Timestamp（例如 Doris Flight SQL 返回的
+/// `Timestamp(Second, Some("Asia/Shanghai"))`）按**该时区的本地墙钟**输出：
+/// 源库里的 `2026-10-19 17:26:48` 写回达梦后仍是 `17:26:48`，不是 UTC 的
+/// `09:26:48`。无法识别的时区直接失败，不按 UTC 静默写出偏移错误的时间。
+pub fn arrow_value_to_text(col: &dyn arrow::array::Array, row: usize) -> D2DResult<Option<String>> {
     use arrow::datatypes::{DataType, TimeUnit};
 
     if col.is_null(row) {
-        return None;
+        return Ok(None);
     }
-    match col.data_type() {
+    let text = match col.data_type() {
         DataType::Boolean => {
-            let a = col.as_any().downcast_ref::<arrow::array::BooleanArray>()?;
-            Some(if a.value(row) { "1".into() } else { "0".into() })
+            let a = col
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .ok_or_else(|| array_type_err("Boolean", col.data_type()))?;
+            if a.value(row) {
+                "1".into()
+            } else {
+                "0".into()
+            }
         }
         // 时间戳：达梦认 `YYYY-MM-DD HH:MM:SS[.ffffff]`
-        DataType::Timestamp(unit, _) => {
-            use arrow::array::TimestampMicrosecondArray as Ts;
-            let a = col.as_any().downcast_ref::<Ts>()?;
+        DataType::Timestamp(unit, tz) => {
             let micros = match unit {
-                TimeUnit::Second => a.value(row) * 1_000_000,
-                TimeUnit::Millisecond => a.value(row) * 1_000,
-                TimeUnit::Microsecond => a.value(row),
-                TimeUnit::Nanosecond => a.value(row) / 1_000,
+                TimeUnit::Second => col
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampSecondArray>()
+                    .ok_or_else(|| array_type_err("Timestamp(Second)", col.data_type()))?
+                    .value(row)
+                    .saturating_mul(1_000_000),
+                TimeUnit::Millisecond => col
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                    .ok_or_else(|| array_type_err("Timestamp(Millisecond)", col.data_type()))?
+                    .value(row)
+                    .saturating_mul(1_000),
+                TimeUnit::Microsecond => col
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    .ok_or_else(|| array_type_err("Timestamp(Microsecond)", col.data_type()))?
+                    .value(row),
+                TimeUnit::Nanosecond => col
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+                    .ok_or_else(|| array_type_err("Timestamp(Nanosecond)", col.data_type()))?
+                    .value(row)
+                    .div_euclid(1_000),
             };
-            Some(micros_to_dm_timestamp(micros))
+            micros_to_dm_timestamp(micros, tz.as_deref())?
         }
         DataType::Date32 => {
-            let a = col.as_any().downcast_ref::<arrow::array::Date32Array>()?;
-            Some(days_to_dm_date(a.value(row) as i64))
+            let a = col
+                .as_any()
+                .downcast_ref::<arrow::array::Date32Array>()
+                .ok_or_else(|| array_type_err("Date32", col.data_type()))?;
+            days_to_dm_date(a.value(row) as i64)
         }
         // 其余交给 Arrow 的规范文本形态：DECIMAL 是精确十进制、整数不走科学计数法
         _ => {
             use arrow::util::display::array_value_to_string;
-            Some(array_value_to_string(col, row).unwrap_or_default())
+            array_value_to_string(col, row)
+                .map_err(|e| D2DError::internal(format!("Arrow 值转文本失败: {e}")))?
+        }
+    };
+    Ok(Some(text))
+}
+
+fn array_type_err(expected: &str, got: &arrow::datatypes::DataType) -> D2DError {
+    D2DError::internal(format!(
+        "Arrow 数组类型与 schema 不一致：期望 {expected}，实际 {got:?}"
+    ))
+}
+
+/// 微秒时间戳 → `YYYY-MM-DD HH:MM:SS.ffffff`
+///
+/// `tz = None` 按 UTC 存储解释；`Some(tz)` 按该时区的本地墙钟输出
+/// （IANA 名称或 `±HH:MM` 固定偏移）。识别不了的时区**报错**，不静默回退 UTC。
+fn micros_to_dm_timestamp(micros: i64, tz: Option<&str>) -> D2DResult<String> {
+    use chrono::{DateTime, Utc};
+    const FMT: &str = "%Y-%m-%d %H:%M:%S%.6f";
+
+    let secs = micros.div_euclid(1_000_000);
+    let frac = micros.rem_euclid(1_000_000) as u32;
+    let utc =
+        DateTime::<Utc>::from_timestamp(secs, frac * 1000).unwrap_or(chrono::DateTime::UNIX_EPOCH);
+
+    match tz {
+        None => Ok(utc.naive_utc().format(FMT).to_string()),
+        Some(tz) if tz.eq_ignore_ascii_case("utc") || tz == "Z" => {
+            Ok(utc.naive_utc().format(FMT).to_string())
+        }
+        Some(tz) => {
+            if let Ok(zone) = tz.parse::<chrono_tz::Tz>() {
+                Ok(utc
+                    .with_timezone(&zone)
+                    .naive_local()
+                    .format(FMT)
+                    .to_string())
+            } else if let Some(off) = parse_fixed_offset(tz) {
+                Ok(utc
+                    .with_timezone(&off)
+                    .naive_local()
+                    .format(FMT)
+                    .to_string())
+            } else {
+                Err(D2DError::external(
+                    "dameng",
+                    format!(
+                        "时间戳时区 `{tz}` 无法识别（支持 IANA 名称如 Asia/Shanghai，\
+                         或 ±HH:MM 固定偏移）；拒绝按 UTC 静默写出偏移错误的时间"
+                    ),
+                ))
+            }
         }
     }
 }
 
-/// 微秒时间戳 → `YYYY-MM-DD HH:MM:SS.ffffff`（UTC 存储，不做时区换算）
-fn micros_to_dm_timestamp(micros: i64) -> String {
-    use chrono::{DateTime, Utc};
-    let secs = micros.div_euclid(1_000_000);
-    let frac = micros.rem_euclid(1_000_000) as u32;
-    match DateTime::<Utc>::from_timestamp(secs, frac * 1000) {
-        Some(dt) => dt.naive_utc().format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
-        None => chrono::DateTime::UNIX_EPOCH
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S%.6f")
-            .to_string(),
+/// `+08:00` / `-05:30` → `FixedOffset`
+fn parse_fixed_offset(s: &str) -> Option<chrono::FixedOffset> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1i32, &s[1..]),
+        b'-' => (-1i32, &s[1..]),
+        _ => return None,
+    };
+    let (h, m) = rest.split_once(':')?;
+    let hours: i32 = h.parse().ok()?;
+    let minutes: i32 = m.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
     }
+    chrono::FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
 }
 
 /// 自 epoch 起的天数 → `YYYY-MM-DD`
@@ -284,7 +370,7 @@ mod tests {
             Arc::new(Int32Array::from(vec![1, 2])),
             Arc::new(StringArray::from(vec!["a", "b"])),
         ]);
-        let t = collect_texts(&b, 0, 2);
+        let t = collect_texts(&b, 0, 2).unwrap();
         assert_eq!(
             t,
             vec![
@@ -301,7 +387,7 @@ mod tests {
     #[test]
     fn test_null_is_none_not_empty_string() {
         let b = batch_of(vec![Arc::new(StringArray::from(vec![Some("x"), None]))]);
-        let t = collect_texts(&b, 0, 2);
+        let t = collect_texts(&b, 0, 2).unwrap();
         assert_eq!(t, vec![Some("x".into()), None]);
     }
 
@@ -310,7 +396,7 @@ mod tests {
     fn test_collect_texts_honours_offset() {
         let b = batch_of(vec![Arc::new(Int32Array::from(vec![10, 20, 30]))]);
         assert_eq!(
-            collect_texts(&b, 1, 2),
+            collect_texts(&b, 1, 2).unwrap(),
             vec![Some("20".into()), Some("30".into())]
         );
     }
@@ -319,9 +405,44 @@ mod tests {
     #[test]
     fn test_timestamp_uses_dm_shape() {
         let arr = TimestampMicrosecondArray::from(vec![0i64]);
-        let s = arrow_value_to_text(&arr, 0).unwrap();
+        let s = arrow_value_to_text(&arr, 0).unwrap().unwrap();
         assert_eq!(s, "1970-01-01 00:00:00.000000");
         assert!(!s.contains('T'), "达梦不认带 T 的时间戳: {}", s);
+    }
+
+    /// 时间戳的四种单位都要能读（Flight SQL 返回 `Timestamp(Second, tz)`）
+    #[test]
+    fn test_timestamp_units() {
+        use arrow::array::{TimestampNanosecondArray, TimestampSecondArray};
+        let a = TimestampSecondArray::from(vec![1i64]);
+        assert_eq!(
+            arrow_value_to_text(&a, 0).unwrap().unwrap(),
+            "1970-01-01 00:00:01.000000"
+        );
+        let a = TimestampNanosecondArray::from(vec![1_500_000_000i64]);
+        assert_eq!(
+            arrow_value_to_text(&a, 0).unwrap().unwrap(),
+            "1970-01-01 00:00:01.500000"
+        );
+    }
+
+    /// 带 IANA 时区：按该时区的本地墙钟写回，而不是 UTC
+    #[test]
+    fn test_timestamp_timezone_uses_local_wall_clock() {
+        use arrow::array::TimestampSecondArray;
+        // 2026-10-19 09:26:48 UTC == 2026-10-19 17:26:48 Asia/Shanghai
+        let a = TimestampSecondArray::from(vec![1792402008i64]).with_timezone("Asia/Shanghai");
+        assert_eq!(
+            arrow_value_to_text(&a, 0).unwrap().unwrap(),
+            "2026-10-19 17:26:48.000000"
+        );
+    }
+
+    #[test]
+    fn test_unknown_timezone_is_an_error_not_utc() {
+        use arrow::array::TimestampSecondArray;
+        let a = TimestampSecondArray::from(vec![0i64]).with_timezone("Mars/Olympus");
+        assert!(arrow_value_to_text(&a, 0).is_err());
     }
 
     #[test]

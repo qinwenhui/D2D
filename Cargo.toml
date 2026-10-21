@@ -61,6 +61,11 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # 而且拉不了大结果集、没有游标。MySQL 协议是业界读 Doris 的标准做法，
 # 也顺带把"按列取元数据"（类型/精度/是否无符号）一起给了。
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
+# Doris 的列式读路径：Arrow Flight SQL（FE 默认端口 8070）。
+# `flight-sql` 带 Flight SQL 客户端；`tls-native-roots` 支持 https 的 FE。
+arrow-flight = { version = "60.0.0", features = ["flight-sql", "tls-native-roots"] }
+# Flight SQL 底层是 tonic gRPC；只用来建 Channel
+tonic = { version = "0.14", features = ["transport"] }
 
 # PostgreSQL 协议（读与写）
 tokio-postgres = "0.7"
@@ -75,6 +80,8 @@ futures = "0.3"
 async-trait = "0.1"
 uuid = { version = "1.10", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+# 带 IANA 时区名（如 Asia/Shanghai）的 Arrow Timestamp 转达梦文本时要用
+chrono-tz = "0.10"
 tokio-stream = "0.1"
 
 # 编码 / 快速字节搜索（dmfldr 文本解析层）

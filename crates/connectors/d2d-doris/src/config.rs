@@ -105,6 +105,12 @@ pub struct DorisConnection {
     /// 读走它而不是 HTTP：Doris 的 REST 查询口在 2.x 已不保证存在，且拉不了大结果集、
     /// 没有游标。MySQL 协议是业界读 Doris 的标准做法。
     pub query_port: u16,
+    /// **FE 的 Arrow Flight SQL 端**（列式读路径 `source.method: flight`）
+    ///
+    /// Doris 默认 8070；本集群三个 FE 都开了 `ArrowFlightSqlPort 8070`。
+    pub flight_port: u16,
+    /// Flight SQL 是否走 TLS（`https://`）；内网默认 false
+    pub flight_tls: bool,
     /// 初始化时解析出的实际 Stream Load 目标（host:port）。
     /// 由 `resolve_load_targets` 填充：显式 be_hosts 优先，否则向 FE 自动发现。
     pub load_targets: Vec<String>,
@@ -218,6 +224,11 @@ impl DorisConnection {
             http_port: port_of("http_port", 8030),
             be_http_port: port_of("be_http_port", 8040),
             query_port: port_of("query_port", 9030),
+            flight_port: port_of("flight_port", 8070),
+            flight_tls: conn
+                .get("flight_tls")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             // 由 init 里的 resolve_load_targets 填充（只有写方向需要）
             load_targets: Vec::new(),
         })
@@ -314,6 +325,8 @@ mod tests {
             http_port: 18030,
             be_http_port: 18040,
             query_port: 19030,
+            flight_port: 8070,
+            flight_tls: false,
             load_targets: Vec::new(),
         }
     }
@@ -363,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_from_json_ports_default_and_override() {
-        // 只给 fe_hosts：三个端口各取自己的缺省（8030 / 8040 / 9030），
+        // 只给 fe_hosts：各端口取自己的缺省（8030 / 8040 / 9030 / 8070），
         // 不是"共用一个"—— 它们本来就不是一个口
         let c = DorisConnection::from_json(
             &json!({"fe_hosts": ["h1"], "username": "u", "password": "p"}),
@@ -372,22 +385,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (c.http_port, c.be_http_port, c.query_port),
-            (8030, 8040, 9030)
+            (c.http_port, c.be_http_port, c.query_port, c.flight_port),
+            (8030, 8040, 9030, 8070)
         );
+        assert!(!c.flight_tls);
         assert_eq!(c.database, "db");
         assert_eq!(c.table, "t");
 
         let c = DorisConnection::from_json(
-            &json!({"fe_hosts": ["h1"], "http_port": 18030, "be_http_port": 18040, "query_port": 19030}),
+            &json!({
+                "fe_hosts": ["h1"], "http_port": 18030, "be_http_port": 18040,
+                "query_port": 19030, "flight_port": 18070, "flight_tls": true
+            }),
             "db",
             "t",
         )
         .unwrap();
         assert_eq!(
-            (c.http_port, c.be_http_port, c.query_port),
-            (18030, 18040, 19030)
+            (c.http_port, c.be_http_port, c.query_port, c.flight_port),
+            (18030, 18040, 19030, 18070)
         );
+        assert!(c.flight_tls);
     }
 
     #[test]

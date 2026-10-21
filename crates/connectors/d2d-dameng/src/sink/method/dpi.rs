@@ -353,7 +353,7 @@ fn insert_batch(
     let mut done = 0usize;
     while done < rows {
         let want = max_rows.min(rows - done);
-        let texts = collect_texts(&batch, done, want);
+        let texts = collect_texts(&batch, done, want)?;
         let (n, widths) = plan_chunk(&texts, ncols, want, cap)?;
         let schema = batch.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -859,7 +859,7 @@ mod tests {
             ("id", Arc::new(Int32Array::from(vec![1, 2]))),
             ("name", Arc::new(StringArray::from(vec![Some("a"), None]))),
         ]);
-        let t = collect_texts(&b, 0, 2);
+        let t = collect_texts(&b, 0, 2).unwrap();
         assert_eq!(
             t,
             vec![Some("1".into()), Some("a".into()), Some("2".into()), None]

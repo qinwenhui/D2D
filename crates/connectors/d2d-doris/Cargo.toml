@@ -21,6 +21,9 @@ uuid = { workspace = true }
 bytes = { workspace = true }
 # 读方向（Doris → X）：走 FE 的 MySQL 协议口
 mysql_async = { workspace = true }
+# 列式读路径：Doris Arrow Flight SQL
+arrow-flight = { workspace = true }
+tonic = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
 # json 序列化要把 Arrow 的时间值渲染成 Doris 认的字符串

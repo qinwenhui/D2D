@@ -398,7 +398,7 @@ fn render_data(
             if c > 0 {
                 out.push_str(sep);
             }
-            match arrow_value_to_text(batch.column(c).as_ref(), r) {
+            match arrow_value_to_text(batch.column(c).as_ref(), r)? {
                 None => out.push_str(null_str),
                 Some(v) => {
                     if v.contains(sep) {

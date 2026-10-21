@@ -9,13 +9,16 @@
 //!
 //! 写方向（X → Doris）不在这里，见 crate 根文档「骨架」一节。
 //!
-//! # 只有一种读取方式，所以没有 `method/` 那一层
+//! # 两种读取方式：`mysql`（缺省）与 `flight`
 //!
-//! 达梦有 `odbc` 与 `dmfldr` 两条路，于是有 `method/` 做路由。Doris 读只有一个口
-//! —— FE 的 MySQL 协议 —— 硬造一层路由只会多一层"为什么这里有个 trait"。
-//! 真出现第二条读法（比如走 BE 的 Arrow Flight）时再加。
+//! - `mysql`：FE 的 MySQL 协议口，逐行解码 → Arrow（兼容性最好）
+//! - `flight`：FE 的 Arrow Flight SQL 口，直接收 Arrow 批（列式，快）
+//!
+//! 两条路共用分片切法与 SQL 渲染；`mysql` 路径另有 `schema` / `conn` / `wire`
+//! 这几个 MySQL 专属模块。`flight` 路径见 [`flight`]。
 
 pub mod conn;
+pub mod flight;
 pub mod schema;
 pub mod sql;
 pub mod wire;
@@ -37,6 +40,7 @@ use tracing::{debug, info};
 
 use crate::config::DorisConnection;
 use crate::source::conn::Reader;
+use crate::source::flight::FlightSource;
 use crate::source::sql::DorisSqlBuilder;
 
 /// 一批交多少行（**上界**，实际还会被字节数提前截断）
@@ -70,6 +74,37 @@ struct ResolvedQuery {
     query: QueryConfig,
 }
 
+/// 读取方式（`source.method`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DorisReadKind {
+    Mysql,
+    Flight,
+}
+
+impl DorisReadKind {
+    fn parse(method: Option<&str>) -> D2DResult<Self> {
+        match method
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("mysql") => Ok(Self::Mysql),
+            Some("flight") | Some("flight_sql") | Some("arrow_flight") => Ok(Self::Flight),
+            Some(other) => Err(D2DError::config(format!(
+                "unsupported doris source method '{other}', expected: mysql | flight"
+            ))),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mysql => "mysql",
+            Self::Flight => "flight",
+        }
+    }
+}
+
 /// Doris Source 连接器 —— 经 FE 的 MySQL 协议口读
 pub struct DorisSourceConnector {
     name: String,
@@ -79,6 +114,9 @@ pub struct DorisSourceConnector {
     /// 与 schema 逐列对齐的逻辑类型（行构建器的解析策略）
     logical: Vec<LogicalType>,
     resolved: Option<ResolvedQuery>,
+    kind: DorisReadKind,
+    /// `method: flight` 的列式读状态
+    flight: Option<FlightSource>,
     /// 本次运行**源端实际交出去的行数**（见 [`Self::exported_rows`]）
     rows_read: Arc<AtomicU64>,
     /// 是否真的开过工 —— 用来区分"读出 0 行"与"根本没读"
@@ -95,6 +133,8 @@ impl DorisSourceConnector {
             schema: None,
             logical: Vec::new(),
             resolved: None,
+            kind: DorisReadKind::Mysql,
+            flight: None,
             rows_read: Arc::new(AtomicU64::new(0)),
             started: Arc::new(AtomicBool::new(false)),
             meter: None,
@@ -266,31 +306,23 @@ impl SourceConnector for DorisSourceConnector {
     }
 
     async fn init(&mut self, spec: &SourceSpec) -> D2DResult<()> {
+        let kind = DorisReadKind::parse(spec.method.as_deref())?;
+        self.kind = kind;
         let database = Self::database_of(spec)?;
         let connection = DorisConnection::from_json(&spec.connection, &database, &spec.table)?;
         info!(
             connector = %self.name,
+            method = kind.as_str(),
             table = %spec.table,
             database = %database,
             query_port = connection.query_port,
+            flight_port = connection.flight_port,
             "initializing doris source"
         );
         // 分片配置在这里就校验（拼错/漏配 fail-fast，不留到 split 才发现）
         if let Some(p) = spec.effective_partition()? {
             p.validate()?;
         }
-
-        let reader = Arc::new(Reader::new(&connection)?);
-
-        // ── 开工前自检：连库 + 把 SQL 真的跑一遍 ──
-        //
-        // 这是"迁 0 行也报成功"那道口子的封堵点：表名拼错、列名不存在、表达式写错，
-        // 全都在这里大声失败，而不是跑完 0 行、退出码 0、日志一路 INFO。
-        // `LIMIT 0` 实测在 1915 万行的表上是 2 ms（FE 只规划不取数），所以这顿自检免费。
-        let mut control = reader
-            .get_conn()
-            .await
-            .map_err(|e| D2DError::external("doris", format!("连不上 Doris FE: {}", e)))?;
 
         // 分区列必须出现在 SELECT 列表里（否则切不了范围）；引擎侧的 Project 会剔回来
         let builder = DorisSqlBuilder::new(Some(&database), &spec.table);
@@ -303,59 +335,102 @@ impl SourceConnector for DorisSourceConnector {
             None => query,
         };
 
-        let resolved_schema = schema::resolve_schema(&mut control, &database, spec, &query).await?;
-        drop(control);
+        match kind {
+            DorisReadKind::Mysql => {
+                let reader = Arc::new(Reader::new(&connection)?);
 
-        // ── 可空分区列 + range：NULL 行会被**静默漏掉** ──
-        //
-        // range 的谓词是 `col >= lo AND col < hi`，NULL 行对它求值为 NULL，
-        // 于是哪个区间都不进。实测（`d2d_type_probe`：3 行，`c_dt` 可空，
-        // range 分 4 片）只迁出去 **2 行**，退出码 0、行数对账还"通过"——
-        // 因为两端数的都是那 2 行。
-        //
-        // hash 模式没有这个问题：它渲染的是 `COALESCE(..., '')`，NULL 落 0 号桶。
-        // 所以这里只提醒，不改内核语义 —— `Range` 谓词长什么样是内核定的，
-        // 连接器私自给它加 `OR col IS NULL` 会让同一个谓词在达梦那边是另一个意思。
-        // 提醒而不是报错：DESCRIBE 说"可空"不等于真有 NULL，有 NULL 也不等于
-        // 用户没打算把它们排除在外（边界是用户自己声明要取的范围）。
-        if let Some(p) = spec.effective_partition()? {
-            if p.mode == d2d_connector::PartitionMode::Range {
-                if let Some(col) = p.column.as_deref() {
-                    let nullable = resolved_schema
-                        .schema
-                        .fields()
-                        .iter()
-                        .find(|f| f.name().eq_ignore_ascii_case(col))
-                        .map(|f| f.is_nullable());
-                    if nullable == Some(true) {
-                        tracing::warn!(
-                            column = %col,
-                            "range 分片的列在表上可空：NULL 行不满足任何区间谓词，会被**静默漏掉**\
-                             （两端行数还会一致）。要么改用 partition.mode=hash（NULL 落 0 号桶），\
-                             要么在 query.where_clause 里显式把 NULL 排除或纳入"
-                        );
+                // ── 开工前自检：连库 + 把 SQL 真的跑一遍 ──
+                //
+                // 这是"迁 0 行也报成功"那道口子的封堵点：表名拼错、列名不存在、表达式写错，
+                // 全都在这里大声失败，而不是跑完 0 行、退出码 0、日志一路 INFO。
+                // `LIMIT 0` 实测在 1915 万行的表上是 2 ms（FE 只规划不取数），所以这顿自检免费。
+                let mut control = reader
+                    .get_conn()
+                    .await
+                    .map_err(|e| D2DError::external("doris", format!("连不上 Doris FE: {}", e)))?;
+                let resolved_schema =
+                    schema::resolve_schema(&mut control, &database, spec, &query).await?;
+                drop(control);
+
+                // ── 可空分区列 + range：NULL 行会被**静默漏掉** ──
+                //
+                // range 的谓词是 `col >= lo AND col < hi`，NULL 行对它求值为 NULL，
+                // 于是哪个区间都不进。实测（`d2d_type_probe`：3 行，`c_dt` 可空，
+                // range 分 4 片）只迁出去 **2 行**，退出码 0、行数对账还"通过"——
+                // 因为两端数的都是那 2 行。
+                //
+                // hash 模式没有这个问题：它渲染的是 `COALESCE(..., '')`，NULL 落 0 号桶。
+                // 所以这里只提醒，不改内核语义 —— `Range` 谓词长什么样是内核定的，
+                // 连接器私自给它加 `OR col IS NULL` 会让同一个谓词在达梦那边是另一个意思。
+                // 提醒而不是报错：DESCRIBE 说"可空"不等于真有 NULL，有 NULL 也不等于
+                // 用户没打算把它们排除在外（边界是用户自己声明要取的范围）。
+                if let Some(p) = spec.effective_partition()? {
+                    if p.mode == d2d_connector::PartitionMode::Range {
+                        if let Some(col) = p.column.as_deref() {
+                            let nullable = resolved_schema
+                                .schema
+                                .fields()
+                                .iter()
+                                .find(|f| f.name().eq_ignore_ascii_case(col))
+                                .map(|f| f.is_nullable());
+                            if nullable == Some(true) {
+                                tracing::warn!(
+                                    column = %col,
+                                    "range 分片的列在表上可空：NULL 行不满足任何区间谓词，会被**静默漏掉**\
+                                     （两端行数还会一致）。要么改用 partition.mode=hash（NULL 落 0 号桶），\
+                                     要么在 query.where_clause 里显式把 NULL 排除或纳入"
+                                );
+                            }
+                        }
                     }
                 }
+
+                self.reader = Some(reader);
+                self.flight = None;
+                self.schema = Some(Arc::clone(&resolved_schema.schema));
+                self.logical = resolved_schema.logical;
+                // 申报尺子：名字与说明由**本连接器**给（引擎不解释字节是什么）
+                self.meter = Some(MemMeter::new(
+                    "doris/mysql 读缓冲",
+                    format!(
+                        "每条连接约 {} B 的协议读缓冲（按需增长，上限 {} B）",
+                        NOMINAL_CONN_READ_BUFFER,
+                        conn::MAX_ALLOWED_PACKET
+                    ),
+                ));
+            }
+            DorisReadKind::Flight => {
+                // Flight MVP 不做 MIN/MAX 探测：range 必须显式给边界
+                if let Some(p) = spec.effective_partition()? {
+                    if p.mode == d2d_connector::PartitionMode::Range
+                        && (p.lower.is_none() || p.upper.is_none())
+                    {
+                        return Err(D2DError::config(
+                            "doris flight 的 range 分片需要显式 lower + upper（不做 MIN/MAX 探测）；\
+                             或改用 partition.mode: hash / list / none",
+                        ));
+                    }
+                }
+                let flight =
+                    FlightSource::init(&connection, &database, &spec.table, &query).await?;
+                self.schema = Some(flight.schema());
+                self.logical = Vec::new();
+                self.flight = Some(flight);
+                self.reader = None;
+                self.meter = None;
+                info!(
+                    connector = %self.name,
+                    table = %spec.table,
+                    "doris flight source 已连接（Arrow Flight SQL）"
+                );
             }
         }
 
-        self.reader = Some(reader);
-        self.schema = Some(Arc::clone(&resolved_schema.schema));
-        self.logical = resolved_schema.logical;
         self.resolved = Some(ResolvedQuery {
             database,
             table: spec.table.clone(),
             query,
         });
-        // 申报尺子：名字与说明由**本连接器**给（引擎不解释字节是什么）
-        self.meter = Some(MemMeter::new(
-            "doris/mysql 读缓冲",
-            format!(
-                "每条连接约 {} B 的协议读缓冲（按需增长，上限 {} B）",
-                NOMINAL_CONN_READ_BUFFER,
-                conn::MAX_ALLOWED_PACKET
-            ),
-        ));
         Ok(())
     }
 
@@ -372,6 +447,33 @@ impl SourceConnector for DorisSourceConnector {
     }
 
     async fn read(&self, split: &SourceSplit) -> D2DResult<RecordBatchStream> {
+        if self.kind == DorisReadKind::Flight {
+            let flight = self
+                .flight
+                .clone()
+                .ok_or_else(|| D2DError::internal("doris flight source 未初始化：先调 init()"))?;
+            let sql = self.build_split_sql(split);
+            if sql.is_empty() {
+                return Err(D2DError::internal("doris source 未初始化：先调 init()"));
+            }
+            let rows_read = Arc::clone(&self.rows_read);
+            let started = Arc::clone(&self.started);
+            let split_id = split.split_id.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel::<D2DResult<arrow::record_batch::RecordBatch>>(
+                CHANNEL_DEPTH,
+            );
+            tokio::spawn(async move {
+                match flight.read(&sql, &tx, &rows_read, &started).await {
+                    Ok(()) => debug!(split = %split_id, "doris flight 分片读完"),
+                    Err(e) => {
+                        // 错误也要送达：发送端被 drop 不等于"读完了"
+                        let _ = tx.send(Err(e)).await;
+                    }
+                }
+            });
+            return Ok(Box::pin(ReceiverStream::new(rx)));
+        }
+
         let reader = self.require_reader()?;
         let schema = self
             .schema
@@ -406,9 +508,16 @@ impl SourceConnector for DorisSourceConnector {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
-    /// 一次 `read` = **一条 MySQL 连接**（取数单元的形态）
+    /// 一次 `read` = **一条连接**（取数单元的形态）
     fn unit_footprint(&self, _spec: &SourceSpec) -> UnitFootprint {
-        UnitFootprint::connection(NOMINAL_CONN_READ_BUFFER + NOMINAL_BATCH_BYTES)
+        match self.kind {
+            DorisReadKind::Mysql => {
+                UnitFootprint::connection(NOMINAL_CONN_READ_BUFFER + NOMINAL_BATCH_BYTES)
+            }
+            DorisReadKind::Flight => {
+                UnitFootprint::connection(flight::NOMINAL_FLIGHT_BUFFER + NOMINAL_BATCH_BYTES)
+            }
+        }
     }
 
     /// 运行期申报：协议读缓冲是**本连接器自己的**，不在任何池的账上
@@ -567,6 +676,26 @@ mod tests {
     use d2d_connector::{PartitionMode, PartitionSpec};
     use serde_json::json;
 
+    #[test]
+    fn test_read_kind_parse() {
+        assert_eq!(DorisReadKind::parse(None).unwrap(), DorisReadKind::Mysql);
+        assert_eq!(
+            DorisReadKind::parse(Some("mysql")).unwrap(),
+            DorisReadKind::Mysql
+        );
+        assert_eq!(
+            DorisReadKind::parse(Some("flight")).unwrap(),
+            DorisReadKind::Flight
+        );
+        assert_eq!(
+            DorisReadKind::parse(Some("arrow_flight")).unwrap(),
+            DorisReadKind::Flight
+        );
+        let e = DorisReadKind::parse(Some("jdbc")).unwrap_err().to_string();
+        assert!(e.contains("mysql"), "{}", e);
+        assert!(e.contains("flight"), "{}", e);
+    }
+
     fn spec() -> SourceSpec {
         SourceSpec {
             connector: "doris".into(),
@@ -591,10 +720,7 @@ mod tests {
     #[test]
     fn test_database_from_schema_name_then_connection() {
         let mut s = spec();
-        assert_eq!(
-            DorisSourceConnector::database_of(&s).unwrap(),
-            "demo_db"
-        );
+        assert_eq!(DorisSourceConnector::database_of(&s).unwrap(), "demo_db");
         // connection.database 作为兼容写法
         s.schema_name = None;
         s.connection = json!({"fe_hosts": ["h"], "database": "db2"});

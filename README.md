@@ -23,7 +23,7 @@
 | connector | source | sink | methods |
 |---|---|---|---|
 | `dameng` | ✓ | ✓ | `odbc` / `dmfldr` / `dpi` |
-| `doris` | ✓ | ✓ | 读：FE MySQL 协议口；写：Stream Load |
+| `doris` | ✓ | ✓ | 读：MySQL 协议 / Arrow Flight SQL；写：Stream Load |
 | `mysql` | ✓ | ✓ | MySQL 协议 |
 | `postgres` | ✓ | ✓ | PostgreSQL 协议 |
 | `qsdb` | ✓ | ✓ | HTTP（`qsdb server`） |
@@ -39,6 +39,24 @@
 QSDB 统一以 **server 模式**运行：先启动 `qsdb server`，再在 `connection.url` 里填
 `http://host:port`。连接器通过官方 `qsdb-client` 读写（写走 Arrow IPC），
 不支持进程内 embedded 模式。
+
+Doris 源默认走 FE 的 MySQL 协议口（`query_port`）。`source.method: flight` 改走
+FE 的 **Arrow Flight SQL** 口（`flight_port`，默认 8070），直接把 Arrow 批送进
+管道，省掉逐行解码：
+
+```yaml
+source:
+  connector: doris
+  method: flight
+  connection:
+    fe_hosts: ["${DORIS_FE}"]
+    flight_port: 8070
+    flight_tls: false        # true = https
+    username: "${DORIS_USER}"
+    password: "${DORIS_PASS}"
+  schema_name: "${DORIS_DB}"
+  table: demo_src
+```
 
 ## 构建
 
