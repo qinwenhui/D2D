@@ -184,7 +184,7 @@ pub(crate) fn collect_texts(
     let ncols = batch.num_columns();
     // **时区每列只解析一次**：Flight 的 30M 行里，逐值 `Tz::from_str` 是白白烧 CPU。
     let fmts: Vec<ColumnTextFmt> = (0..ncols)
-        .map(|c| ColumnTextFmt::for_type(batch.column(c).data_type()))
+        .map(|c| ColumnTextFmt::for_column(batch.column(c).as_ref()))
         .collect::<D2DResult<_>>()?;
     let cols = batch.columns();
     let mut out = Vec::with_capacity(rows * ncols);
@@ -239,6 +239,28 @@ impl ColumnTextFmt {
             }
             _ => Ok(Self::General),
         }
+    }
+
+    /// 批量路径：如果本批时间戳没有跨时区跳变，把 IANA 时区降级成固定偏移
+    ///
+    /// `chrono_tz` 的 `with_timezone` 每个值都查一次时区规则；对 `Asia/Shanghai`
+    /// 这类无夏令时的时区，一整批（通常几分钟内）用同一个偏移即可。跨 DST 的批
+    /// （或跨度 > 1 天）仍走 IANA 逐值换算，不牺牲正确性。
+    fn for_column(col: &dyn arrow::array::Array) -> D2DResult<Self> {
+        let fmt = Self::for_type(col.data_type())?;
+        if let Self::Timestamp {
+            unit,
+            tz: TzSpec::Iana(zone),
+        } = fmt
+        {
+            if let Some(off) = uniform_offset(col, unit, zone)? {
+                return Ok(Self::Timestamp {
+                    unit,
+                    tz: TzSpec::Fixed(off),
+                });
+            }
+        }
+        Ok(fmt)
     }
 
     fn text(&self, col: &dyn arrow::array::Array, row: usize) -> D2DResult<Option<String>> {
@@ -300,6 +322,45 @@ fn general_value_to_text(col: &dyn arrow::array::Array, row: usize) -> D2DResult
         }
     };
     Ok(text)
+}
+
+/// 本批内 IANA 时区是否等价于一个固定偏移
+///
+/// 只在本批最早/最晚值相隔 ≤ 1 天、且两端偏移相同时返回——一天内不可能跨两次
+/// 时区跳变；跨 DST 的批（两端偏移不同）继续走 IANA 逐值换算。
+fn uniform_offset(
+    col: &dyn arrow::array::Array,
+    unit: TimeUnit,
+    zone: chrono_tz::Tz,
+) -> D2DResult<Option<chrono::FixedOffset>> {
+    use chrono::{DateTime, Offset, TimeZone, Utc};
+
+    let mut min = i64::MAX;
+    let mut max = i64::MIN;
+    for row in 0..col.len() {
+        if col.is_null(row) {
+            continue;
+        }
+        let m = timestamp_micros(col, row, unit)?;
+        min = min.min(m);
+        max = max.max(m);
+    }
+    if min == i64::MAX {
+        return Ok(None); // 全 NULL
+    }
+    const ONE_DAY_MICROS: i64 = 86_400_000_000;
+    if max.saturating_sub(min) > ONE_DAY_MICROS {
+        return Ok(None);
+    }
+    let offset_at = |micros: i64| -> chrono::FixedOffset {
+        let secs = micros.div_euclid(1_000_000);
+        let dt =
+            DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH);
+        zone.offset_from_utc_datetime(&dt.naive_utc()).fix()
+    };
+    let a = offset_at(min);
+    let b = offset_at(max);
+    Ok((a == b).then_some(a))
 }
 
 fn timestamp_micros(col: &dyn arrow::array::Array, row: usize, unit: TimeUnit) -> D2DResult<i64> {
