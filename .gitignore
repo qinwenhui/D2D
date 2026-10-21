@@ -12,6 +12,7 @@
 
 # Internal development docs, reports, screenshots, logs
 /*.md
+!/README.md
 /*.pdf
 /*.html
 /*.png
