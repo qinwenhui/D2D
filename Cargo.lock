@@ -866,6 +866,7 @@ dependencies = [
  "d2d-execution",
  "d2d-mysql",
  "d2d-postgres",
+ "d2d-qsdb",
  "d2d-transform",
  "d2d-types",
  "serde",
@@ -1013,6 +1014,23 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "d2d-qsdb"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "d2d-connector",
+ "d2d-core",
+ "d2d-types",
+ "futures",
+ "qsdb-client",
+ "serde_json",
+ "tokio",
  "tokio-stream",
  "tracing",
 ]
@@ -2466,6 +2484,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "qsdb-client"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "020830e65ce6529fedca7ee3072094de57daf08e058fc8e07e15d2d64a8a611d"
+dependencies = [
+ "arrow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

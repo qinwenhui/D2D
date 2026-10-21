@@ -32,6 +32,7 @@ pub fn register_all(reg: &ConnectorRegistry) {
     d2d_doris::register(reg);
     d2d_mysql::register(reg);
     d2d_postgres::register(reg);
+    d2d_qsdb::register(reg);
     info!("已注册的连接器：{}", reg.describe());
 }
 
@@ -48,15 +49,15 @@ mod tests {
         // Doris 现在也两个方向都在：读走 FE 的 MySQL 协议口（source/），写走 Stream Load（sink/）
         assert_eq!(
             reg.list_sources(),
-            vec!["dameng", "doris", "mysql", "postgres"]
+            vec!["dameng", "doris", "mysql", "postgres", "qsdb"]
         );
         assert_eq!(
             reg.list_sinks(),
-            vec!["dameng", "doris", "mysql", "postgres"]
+            vec!["dameng", "doris", "mysql", "postgres", "qsdb"]
         );
         assert_eq!(
             reg.list_type_adapters(),
-            vec!["dameng", "doris", "mysql", "postgres"]
+            vec!["dameng", "doris", "mysql", "postgres", "qsdb"]
         );
     }
 

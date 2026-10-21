@@ -26,6 +26,7 @@
 | `doris` | ✓ | ✓ | 读：FE MySQL 协议口；写：Stream Load |
 | `mysql` | ✓ | ✓ | MySQL 协议 |
 | `postgres` | ✓ | ✓ | PostgreSQL 协议 |
+| `qsdb` | ✓ | ✓ | HTTP（`qsdb server`） |
 
 原生依赖只在选择对应 method 时需要：
 
@@ -34,6 +35,10 @@
 - 达梦 `odbc`：unixODBC 与达梦 ODBC 驱动。
 
 其余连接器没有额外原生依赖。
+
+QSDB 统一以 **server 模式**运行：先启动 `qsdb server`，再在 `connection.url` 里填
+`http://host:port`。连接器通过官方 `qsdb-client` 读写（写走 Arrow IPC），
+不支持进程内 embedded 模式。
 
 ## 构建
 
