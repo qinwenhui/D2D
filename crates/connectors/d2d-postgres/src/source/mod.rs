@@ -132,8 +132,7 @@ impl PgSourceConnector {
         let Some(p) = spec.effective_partition()? else {
             return Ok(vec![Self::single_split(&spec.table)]);
         };
-        let probed = if p.mode == PartitionMode::Range && (p.lower.is_none() || p.upper.is_none())
-        {
+        let probed = if p.mode == PartitionMode::Range && (p.lower.is_none() || p.upper.is_none()) {
             let col = p.column.clone().unwrap_or_default();
             let (lo, hi) = self.probe_min_max(spec, &col).await?;
             let cuts = d2d_connector::partition::range_cuts(&lo, &hi, p.count)?;
@@ -142,12 +141,8 @@ impl PgSourceConnector {
         } else {
             None
         };
-        let plan = d2d_connector::partition::plan(
-            &p,
-            &spec.table,
-            spec.schema_name.as_deref(),
-            probed,
-        )?;
+        let plan =
+            d2d_connector::partition::plan(&p, &spec.table, spec.schema_name.as_deref(), probed)?;
         Ok(plan
             .partitions
             .iter()
@@ -175,7 +170,10 @@ impl PgSourceConnector {
         &self,
         spec: &SourceSpec,
         column: &str,
-    ) -> D2DResult<(d2d_connector::partition::Literal, d2d_connector::partition::Literal)> {
+    ) -> D2DResult<(
+        d2d_connector::partition::Literal,
+        d2d_connector::partition::Literal,
+    )> {
         if column.trim().is_empty() {
             return Err(D2DError::config(
                 "partition.mode=range 需要 column（或显式给 lower+upper 以跳过探测）",
@@ -271,7 +269,10 @@ impl SourceConnector for PgSourceConnector {
         });
         self.meter = Some(MemMeter::new(
             "postgres 读缓冲",
-            format!("每条连接约 {} B 的结果缓冲（按需增长）", NOMINAL_CONN_READ_BUFFER),
+            format!(
+                "每条连接约 {} B 的结果缓冲（按需增长）",
+                NOMINAL_CONN_READ_BUFFER
+            ),
         ));
         Ok(())
     }
@@ -318,8 +319,7 @@ impl SourceConnector for PgSourceConnector {
         );
         tokio::spawn(async move {
             let res = stream_split(
-                connection, database, sql, schema, logical, bytea, &tx, &rows_read, &started,
-                meter,
+                connection, database, sql, schema, logical, bytea, &tx, &rows_read, &started, meter,
             )
             .await;
             if let Err(e) = res {
@@ -419,7 +419,9 @@ async fn stream_split(
         let decoded: Vec<Option<Box<[u8]>>> = (0..ncols)
             .map(|i| {
                 if bytea_columns.get(i).copied().unwrap_or(false) {
-                    raw[i].map(|s| decode_hex(s).map(Vec::into_boxed_slice)).transpose()
+                    raw[i]
+                        .map(|s| decode_hex(s).map(Vec::into_boxed_slice))
+                        .transpose()
                 } else {
                     Ok(None)
                 }
@@ -464,11 +466,14 @@ async fn stream_split(
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, D2DError> {
     if !s.len().is_multiple_of(2) {
-        return Err(D2DError::schema(format!("bytea 十六进制串长度为奇数: {:?}", s)));
+        return Err(D2DError::schema(format!(
+            "bytea 十六进制串长度为奇数: {:?}",
+            s
+        )));
     }
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len() / 2);
-    for pair in b.chunks_exact(2) {
+    for pair in b.as_chunks::<2>().0 {
         let hi = (pair[0] as char)
             .to_digit(16)
             .ok_or_else(|| D2DError::schema(format!("bytea 十六进制串非法: {:?}", s)))?;
@@ -522,7 +527,10 @@ mod tests {
     #[tokio::test]
     async fn test_read_before_init_errors() {
         let c = PgSourceConnector::new();
-        let s = SourceSplit { split_id: "x".into(), split_info: json!({"where_condition": ""}) };
+        let s = SourceSplit {
+            split_id: "x".into(),
+            split_info: json!({"where_condition": ""}),
+        };
         assert!(c.read(&s).await.is_err());
         assert!(c.schema().await.is_err());
     }

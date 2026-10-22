@@ -593,6 +593,8 @@ impl FlDrMethod {
 ///
 /// 与 [`parse_chunk_into`] 的差别只在 Reader：`TailReader` 在数据还没写完时
 /// 等待而不是 EOF；末行补齐、行数按 `\n` 计数等语义完全复用。
+// 参数都是跟随解析的一次性上下文；拆成结构体只会把调用点搬得更远。
+#[allow(clippy::too_many_arguments)]
 fn parse_stream_into(
     tx: &tokio::sync::mpsc::Sender<D2DResult<RecordBatch>>,
     path: &Path,

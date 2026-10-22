@@ -301,10 +301,7 @@ impl Read for TailReader {
             // 当前可读位置是 EOF 或零区：等 dmfldr 继续写
             if self.done.is_done() {
                 if let Some(e) = self.done.error() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ));
+                    return Err(std::io::Error::other(e.to_string()));
                 }
                 self.verify_no_hidden_data()?;
                 return Ok(0);
@@ -604,6 +601,7 @@ mod tests {
         let writer = std::thread::spawn(move || {
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&p)
