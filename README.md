@@ -80,13 +80,14 @@ source  ──► [source_pool] ──► pipeline ──► [sink_pool] ──�
 
 | 产物 | 平台 | 系统要求 |
 |---|---|---|
-| `d2d-<version>-linux-x86_64-glibc217.tar.gz` | Linux x86_64 | glibc ≥ 2.17（CentOS 7 / RHEL 7，也适用于新发行版） |
-| `d2d-<version>-linux-aarch64-glibc217.tar.gz` | Linux aarch64 | glibc ≥ 2.17 |
+| `d2d-<version>-linux-x86_64.tar.gz` | Linux x86_64 | glibc ≥ 2.39（Ubuntu 24.04 基线） |
+| `d2d-<version>-linux-aarch64.tar.gz` | Linux aarch64 | glibc ≥ 2.39（Ubuntu 24.04 基线） |
+| `d2d-<version>-linux-x86_64-glibc217.tar.gz` | Linux x86_64 | glibc ≥ 2.17（CentOS 7 / RHEL 7 等老平台） |
 | `d2d-<version>-windows-x86_64.zip` | Windows x64 | Windows 10 / 11 |
 | `d2d-<version>-windows-aarch64.zip` | Windows on ARM | Windows 11 ARM64 |
 
-Linux 包都在 CentOS 7 兼容环境里构建，x86_64 / aarch64 都能运行在
-CentOS 7 及以上（glibc ≥ 2.17）。每个包解压后包含：
+`glibc217` 包在 CentOS 7 兼容环境里构建，专门用于老平台；它在新发行版上同样能跑。
+不确定选哪个 Linux 包时，用 `glibc217` 那个最稳。每个包解压后包含：
 
 ```text
 d2d（Windows 上是 d2d.exe）
