@@ -928,7 +928,7 @@ echo "424242 rows is load out"
         let dead_dir = d.path().join(format!("T_A_{}_abc123", dead));
         let live_dir = d.path().join(format!("T_A_{}_abc123", me));
         let other_table_dead = d.path().join(format!("T_B_{}_def456", dead));
-        let old_format = d.path().join("T_A_notauuid".to_string());
+        let old_format = d.path().join("T_A_notauuid");
         let weird_file = d.path().join(format!("T_A_{}_file", dead));
         for x in [&dead_dir, &live_dir, &other_table_dead, &old_format] {
             std::fs::create_dir_all(x).unwrap();
