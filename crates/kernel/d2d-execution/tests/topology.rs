@@ -696,6 +696,10 @@ async fn test_tight_pools_do_not_deadlock() {
 }
 
 /// 溢出到磁盘同样一条不丢（池容量只有 8KB，数据远大于它）
+///
+/// 目标端故意用 [`SlowSink`]：快消费者会把队列随手排空，池峰值只剩一两件，
+/// 8192 的容量恰好装得下 —— 测试于是变成"看调度运气"（CI 上抖过一次）。
+/// 慢消费者保证上游真的把池压满，溢出是确定发生的。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_spill_path_loses_no_rows() {
     let dir = std::env::temp_dir().join(format!("d2d-flow-spill-{}", std::process::id()));
@@ -704,11 +708,15 @@ async fn test_spill_path_loses_no_rows() {
     let f = spec(&format!(
         "source:\n  concurrency: 2\n  pool: {{capacity: 8192, on_overflow: spill, spill_dir: \"{d}\"}}\n\
          pipeline: {{concurrency: 2, batch_bytes: 0}}\n\
-         sink: {{concurrency: 1, pool: {{capacity: 8192, on_overflow: spill, spill_dir: \"{d}\"}}}}"
+         sink: {{concurrency: 1, batch_bytes: 0, batch_rows: 0, pool: {{capacity: 8192, on_overflow: spill, spill_dir: \"{d}\"}}}}"
     ));
     let src = FakeSource::logical(8, 200, 32);
-    let snk = FakeSink::default();
-    let r = go(&f, src, &snk, logical_path()).await.unwrap();
+    let snk = Arc::new(SlowSink {
+        rec: Arc::new(Mutex::new(Rec::default())),
+    });
+    let r = go_with_sink(&f, src, snk, logical_path(), true)
+        .await
+        .unwrap();
     assert_eq!(r.rows_written, 1600);
     assert!(
         r.source_pool.spilled_items > 0 || r.sink_pool.spilled_items > 0,
