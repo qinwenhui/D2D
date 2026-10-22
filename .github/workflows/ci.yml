@@ -41,9 +41,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y unixodbc-dev pkg-config libssl-dev
       # 需要真库的集成测试都是 #[ignore]，CI 里不会连外部服务。
       - name: Build
-        run: cargo build --workspace --all-targets --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --workspace --all-targets --locked 2>&1 | tee build.log
       - name: Test
-        run: cargo test --workspace --lib --tests --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --lib --tests --locked 2>&1 | tee test.log
+      # 失败时把日志尾部转成 annotation，公开仓库也能通过 API 看到原因
+      - name: Report failure
+        if: failure()
+        shell: bash
+        run: |
+          for f in build.log test.log; do
+            if [ -f "$f" ]; then
+              msg=$(tail -n 60 "$f" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/')
+              printf '::error title=Failure in %s::%s\n' "$f" "$msg"
+            fi
+          done
 
   lint:
     name: fmt + clippy
@@ -104,6 +121,7 @@ jobs:
           exit 1
       - name: Build in CentOS 7-compatible image
         run: |
+          set -o pipefail
           docker run --rm -v "$PWD":/src -w /src \
             -e RUST_VERSION="$RUST_VERSION" \
             "$IMAGE" \
@@ -115,7 +133,14 @@ jobs:
                 | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
               . "$HOME/.cargo/env"
               cargo build --release --locked -p d2d-cli
-            '
+            ' 2>&1 | tee build.log
+      - name: Report failure
+        if: failure()
+        run: |
+          if [ -f build.log ]; then
+            msg=$(tail -n 60 build.log | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/')
+            printf '::error title=Build failure::%s\n' "$msg"
+          fi
       # 容器里是 root，target/ 归 root 所有；交还给 runner 用户
       - name: Fix workspace ownership
         run: sudo chown -R "$(id -u):$(id -g)" target
