@@ -14,16 +14,24 @@ permissions:
   contents: write
 
 jobs:
+  # 新发行版的原生 glibc 构建（x86_64 / aarch64）
   linux:
-    name: linux / ${{ matrix.arch }} (glibc 2.17)
+    name: linux / ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-    uses: ./.github/workflows/build-linux-glibc217.yml
+    uses: ./.github/workflows/build-linux-native.yml
     with:
       ref: ${{ github.event.inputs.tag || '' }}
       arch: ${{ matrix.arch }}
+
+  # CentOS 7 / RHEL 7（glibc 2.17），固定 x86_64
+  linux-glibc217:
+    name: linux / x86_64 (glibc 2.17)
+    uses: ./.github/workflows/build-linux-glibc217.yml
+    with:
+      ref: ${{ github.event.inputs.tag || '' }}
 
   windows:
     name: windows / ${{ matrix.arch }}
@@ -65,7 +73,7 @@ jobs:
 
   publish:
     name: publish release
-    needs: [linux, windows]
+    needs: [linux, linux-glibc217, windows]
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
