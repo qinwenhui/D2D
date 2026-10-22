@@ -74,33 +74,42 @@ source  ──► [source_pool] ──► pipeline ──► [sink_pool] ──�
 
 ## 安装
 
-### 1. 用发布包（CentOS 7 / glibc 2.17）
+### 1. 用发布包
 
-从 [Releases](https://github.com/qinwenhui/D2D/releases) 下载
-`d2d-<version>-linux-x86_64-glibc217.tar.gz`，解压后包含：
+从 [Releases](https://github.com/qinwenhui/D2D/releases) 按目标平台选择：
+
+| 产物 | 平台 | 系统要求 |
+|---|---|---|
+| `d2d-<version>-linux-x86_64-glibc217.tar.gz` | Linux x86_64 | glibc ≥ 2.17（CentOS 7 / RHEL 7，也适用于新发行版） |
+| `d2d-<version>-linux-aarch64-glibc217.tar.gz` | Linux aarch64 | glibc ≥ 2.17 |
+| `d2d-<version>-windows-x86_64.zip` | Windows x64 | Windows 10 / 11 |
+| `d2d-<version>-windows-aarch64.zip` | Windows on ARM | Windows 11 ARM64 |
+
+Linux 包都在 CentOS 7 兼容环境里构建，x86_64 / aarch64 都能运行在
+CentOS 7 及以上（glibc ≥ 2.17）。每个包解压后包含：
 
 ```text
-d2d
+d2d（Windows 上是 d2d.exe）
 README.md
 LICENSE / LICENSE-MIT / LICENSE-APACHE
 examples/*.yaml
 ```
 
-这个包在 CentOS 7 兼容环境里构建，要求 **glibc ≥ 2.17**；在更新的发行版上也能运行。
-运行前先装 unixODBC 运行库：
+Linux 运行前先装 unixODBC 运行库（二进制的链接期依赖）：
 
 ```bash
 # CentOS 7 / RHEL 7
 yum install -y unixODBC
 # Debian / Ubuntu
 apt install -y unixodbc
-```
 
-检查动态依赖是否齐全：
-
-```bash
 ldd ./d2d | grep 'not found'   # 应当没有输出
 ```
+
+> **为什么不提供 musl 静态包**：`dpi` / `odbc` 需要在运行期 `dlopen` 达梦客户端库，
+> 而静态 musl 二进制没有动态加载器，`dlopen` 会直接失败；同时 `odbc-sys` 还要求在
+> 链接期找到 unixODBC。老平台请用上面的 **glibc217** 包，它保留了动态加载能力，
+> 并且把 glibc 基线压到了 2.17。
 
 ### 2. 从源码构建
 
