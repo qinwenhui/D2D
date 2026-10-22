@@ -26,7 +26,14 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # gh 需要知道仓库。只下载 artifact 的 job 里没有 checkout，
+      # gh 会去跑 `git rev-parse` 而失败；显式给仓库最稳。
+      GH_REPO: ${{ github.repository }}
     steps:
+      # `--verify-tag` / `--generate-notes` 需要一个可用的 git 仓库和 tag
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: d2d-linux-x86_64-glibc217
