@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-connector"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "futures",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-dameng"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-doris"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-execution"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-memory"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "d2d-core",
  "tokio",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-mysql"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-postgres"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-qsdb"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-transform"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "d2d-core",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "d2d-types"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "chrono",
