@@ -123,7 +123,13 @@ mod tests {
     #[test]
     fn test_unsigned_flag_changes_type() {
         let signed = col(ColumnType::MYSQL_TYPE_LONG, 11, 0, ColumnFlags::empty(), 63);
-        let unsigned = col(ColumnType::MYSQL_TYPE_LONG, 11, 0, ColumnFlags::UNSIGNED_FLAG, 63);
+        let unsigned = col(
+            ColumnType::MYSQL_TYPE_LONG,
+            11,
+            0,
+            ColumnFlags::UNSIGNED_FLAG,
+            63,
+        );
         assert_eq!(logical_type_of(&signed).unwrap(), LogicalType::Int32);
         assert_eq!(logical_type_of(&unsigned).unwrap(), LogicalType::UInt32);
     }
@@ -131,28 +137,61 @@ mod tests {
     /// TEXT 与 BLOB 都走 BLOB 码，靠字符集区分
     #[test]
     fn test_blob_vs_text_by_charset() {
-        let text = col(ColumnType::MYSQL_TYPE_BLOB, 65535, 0, ColumnFlags::empty(), 45);
-        let blob = col(ColumnType::MYSQL_TYPE_BLOB, 65535, 0, ColumnFlags::empty(), 63);
+        let text = col(
+            ColumnType::MYSQL_TYPE_BLOB,
+            65535,
+            0,
+            ColumnFlags::empty(),
+            45,
+        );
+        let blob = col(
+            ColumnType::MYSQL_TYPE_BLOB,
+            65535,
+            0,
+            ColumnFlags::empty(),
+            63,
+        );
         assert_eq!(logical_type_of(&text).unwrap(), LogicalType::LargeUtf8);
         assert_eq!(logical_type_of(&blob).unwrap(), LogicalType::LargeBinary);
     }
 
     #[test]
     fn test_temporal_fractional_digits() {
-        let ts = |p| LogicalType::Timestamp { precision: p, tz: None };
+        let ts = |p| LogicalType::Timestamp {
+            precision: p,
+            tz: None,
+        };
         assert_eq!(
-            logical_type_of(&col(ColumnType::MYSQL_TYPE_DATETIME, 19, 0, ColumnFlags::empty(), 63))
-                .unwrap(),
+            logical_type_of(&col(
+                ColumnType::MYSQL_TYPE_DATETIME,
+                19,
+                0,
+                ColumnFlags::empty(),
+                63
+            ))
+            .unwrap(),
             ts(TemporalPrecision::Second)
         );
         assert_eq!(
-            logical_type_of(&col(ColumnType::MYSQL_TYPE_DATETIME, 23, 3, ColumnFlags::empty(), 63))
-                .unwrap(),
+            logical_type_of(&col(
+                ColumnType::MYSQL_TYPE_DATETIME,
+                23,
+                3,
+                ColumnFlags::empty(),
+                63
+            ))
+            .unwrap(),
             ts(TemporalPrecision::Milli)
         );
         assert_eq!(
-            logical_type_of(&col(ColumnType::MYSQL_TYPE_DATETIME, 26, 6, ColumnFlags::empty(), 63))
-                .unwrap(),
+            logical_type_of(&col(
+                ColumnType::MYSQL_TYPE_DATETIME,
+                26,
+                6,
+                ColumnFlags::empty(),
+                63
+            ))
+            .unwrap(),
             ts(TemporalPrecision::Micro)
         );
     }
@@ -161,15 +200,33 @@ mod tests {
     fn test_decimal_precision_from_display_width() {
         // decimal(10,2) → 显示宽度 12
         assert_eq!(
-            logical_type_of(&col(ColumnType::MYSQL_TYPE_NEWDECIMAL, 12, 2, ColumnFlags::empty(), 63))
-                .unwrap(),
-            LogicalType::Decimal { precision: 10, scale: 2 }
+            logical_type_of(&col(
+                ColumnType::MYSQL_TYPE_NEWDECIMAL,
+                12,
+                2,
+                ColumnFlags::empty(),
+                63
+            ))
+            .unwrap(),
+            LogicalType::Decimal {
+                precision: 10,
+                scale: 2
+            }
         );
         // decimal(10,0) → 11
         assert_eq!(
-            logical_type_of(&col(ColumnType::MYSQL_TYPE_NEWDECIMAL, 11, 0, ColumnFlags::empty(), 63))
-                .unwrap(),
-            LogicalType::Decimal { precision: 10, scale: 0 }
+            logical_type_of(&col(
+                ColumnType::MYSQL_TYPE_NEWDECIMAL,
+                11,
+                0,
+                ColumnFlags::empty(),
+                63
+            ))
+            .unwrap(),
+            LogicalType::Decimal {
+                precision: 10,
+                scale: 0
+            }
         );
     }
 

@@ -201,19 +201,35 @@ fn value_of(
     }
     Ok(match dt {
         DataType::Boolean => {
-            let v = arr.as_any().downcast_ref::<BooleanArray>().unwrap().value(row);
+            let v = arr
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(row);
             PgParam::Text(Some(if v { "true" } else { "false" }.to_string()))
         }
         DataType::Binary => {
-            let v = arr.as_any().downcast_ref::<BinaryArray>().unwrap().value(row);
+            let v = arr
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .value(row);
             PgParam::Bytes(Some(v.to_vec()))
         }
         DataType::LargeBinary => {
-            let v = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap().value(row);
+            let v = arr
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value(row);
             PgParam::Bytes(Some(v.to_vec()))
         }
         DataType::Date32 => {
-            let days = arr.as_any().downcast_ref::<Date32Array>().unwrap().value(row);
+            let days = arr
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap()
+                .value(row);
             let d = chrono::DateTime::from_timestamp(days as i64 * 86400, 0)
                 .ok_or_else(|| D2DError::schema(format!("列 `{}` 的日期 {} 超出范围", col, days)))?
                 .naive_utc()
@@ -277,9 +293,18 @@ fn fmt_time(v: i64, unit: arrow::datatypes::TimeUnit, col: &str) -> D2DResult<St
     use arrow::datatypes::TimeUnit;
     let (secs, nanos) = match unit {
         TimeUnit::Second => (v, 0),
-        TimeUnit::Millisecond => (v.div_euclid(1_000), (v.rem_euclid(1_000) * 1_000_000) as u32),
-        TimeUnit::Microsecond => (v.div_euclid(1_000_000), (v.rem_euclid(1_000_000) * 1_000) as u32),
-        TimeUnit::Nanosecond => (v.div_euclid(1_000_000_000), v.rem_euclid(1_000_000_000) as u32),
+        TimeUnit::Millisecond => (
+            v.div_euclid(1_000),
+            (v.rem_euclid(1_000) * 1_000_000) as u32,
+        ),
+        TimeUnit::Microsecond => (
+            v.div_euclid(1_000_000),
+            (v.rem_euclid(1_000_000) * 1_000) as u32,
+        ),
+        TimeUnit::Nanosecond => (
+            v.div_euclid(1_000_000_000),
+            v.rem_euclid(1_000_000_000) as u32,
+        ),
     };
     let t = chrono::NaiveTime::from_num_seconds_from_midnight_opt(secs as u32, nanos)
         .ok_or_else(|| D2DError::schema(format!("列 `{}` 的时间值 {} 超出范围", col, v)))?;
@@ -295,9 +320,18 @@ fn fmt_timestamp(v: i64, unit: arrow::datatypes::TimeUnit, col: &str) -> D2DResu
     use arrow::datatypes::TimeUnit;
     let (secs, nanos) = match unit {
         TimeUnit::Second => (v, 0),
-        TimeUnit::Millisecond => (v.div_euclid(1_000), (v.rem_euclid(1_000) * 1_000_000) as u32),
-        TimeUnit::Microsecond => (v.div_euclid(1_000_000), (v.rem_euclid(1_000_000) * 1_000) as u32),
-        TimeUnit::Nanosecond => (v.div_euclid(1_000_000_000), v.rem_euclid(1_000_000_000) as u32),
+        TimeUnit::Millisecond => (
+            v.div_euclid(1_000),
+            (v.rem_euclid(1_000) * 1_000_000) as u32,
+        ),
+        TimeUnit::Microsecond => (
+            v.div_euclid(1_000_000),
+            (v.rem_euclid(1_000_000) * 1_000) as u32,
+        ),
+        TimeUnit::Nanosecond => (
+            v.div_euclid(1_000_000_000),
+            v.rem_euclid(1_000_000_000) as u32,
+        ),
     };
     let dt = chrono::DateTime::from_timestamp(secs, nanos)
         .ok_or_else(|| D2DError::schema(format!("列 `{}` 的时间戳 {} 超出范围", col, v)))?
@@ -376,9 +410,18 @@ mod tests {
     #[test]
     fn test_build_insert_placeholder_numbering() {
         let s = session(vec![
-            TargetColumn { name: "id".into(), cast: Cast::Text("bigint".into()) },
-            TargetColumn { name: "b".into(), cast: Cast::Bytea },
-            TargetColumn { name: "s".into(), cast: Cast::Text("text".into()) },
+            TargetColumn {
+                name: "id".into(),
+                cast: Cast::Text("bigint".into()),
+            },
+            TargetColumn {
+                name: "b".into(),
+                cast: Cast::Bytea,
+            },
+            TargetColumn {
+                name: "s".into(),
+                cast: Cast::Text("text".into()),
+            },
         ]);
         let sql = s.build_insert("\"id\",\"b\",\"s\"", 2);
         assert_eq!(

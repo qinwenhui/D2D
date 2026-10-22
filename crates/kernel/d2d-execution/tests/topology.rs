@@ -96,16 +96,14 @@ impl SourceConnector for FakeSource {
             let n = self.batch_rows.min(self.rows_per_split - off);
             let ids: Vec<i64> = (0..n).map(|k| (base + off + k) as i64).collect();
             let vs: Vec<String> = ids.iter().map(|i| format!("v{}", i)).collect();
-            out.push(Ok(
-                arrow::array::RecordBatch::try_new(
-                    schema(),
-                    vec![
-                        Arc::new(Int64Array::from(ids)),
-                        Arc::new(StringArray::from(vs)),
-                    ],
-                )
-                .unwrap(),
-            ));
+            out.push(Ok(arrow::array::RecordBatch::try_new(
+                schema(),
+                vec![
+                    Arc::new(Int64Array::from(ids)),
+                    Arc::new(StringArray::from(vs)),
+                ],
+            )
+            .unwrap()));
             off += n;
         }
         Ok(Box::pin(futures::stream::iter(out)))
@@ -510,7 +508,11 @@ async fn test_direct_path_passes_bytes_verbatim_in_order() {
     let r = go(&f, src, &snk, direct_path()).await.unwrap();
     assert_eq!(r.rows_written, 600);
     let rec = snk.rec.lock().unwrap();
-    assert_eq!(rec.body, expected_direct_body(), "直通必须逐位保真，一块不多一块不少");
+    assert_eq!(
+        rec.body,
+        expected_direct_body(),
+        "直通必须逐位保真，一块不多一块不少"
+    );
     // 会话数 = "内核攒出了几份"，上限是源端块数（6 片 × ⌈100/37⌉ = 18 块）
     assert!(
         (1..=18).contains(&rec.sessions),
@@ -643,9 +645,11 @@ async fn test_direct_row_mismatch_fails() {
 /// 现在三个数一直在，判据是一个纯函数，报告里带得出来、也测得出来。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_mismatch_is_reported_even_when_verification_is_off() {
-    let f = spec("source: {concurrency: 2}
+    let f = spec(
+        "source: {concurrency: 2}
 pipeline: {concurrency: 2}
-sink: {concurrency: 2}");
+sink: {concurrency: 2}",
+    );
     let src = FakeSource::physical(4, 50, 25);
     let snk = FakeSink::default();
     snk.rec.lock().unwrap().drop_rows = 7; // 目标端每会话"静默"少收 7 行

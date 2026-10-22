@@ -216,11 +216,19 @@ impl UnitFootprint {
     }
     /// 全是子进程的（如 dmfldr 的导出进程）
     pub fn process(bytes_each: usize) -> Self {
-        Self { kind: UnitKind::Process, bytes_each, child_bytes_each: bytes_each }
+        Self {
+            kind: UnitKind::Process,
+            bytes_each,
+            child_bytes_each: bytes_each,
+        }
     }
     /// 全在进程内的（如 ODBC 的行集缓冲）
     pub fn connection(bytes_each: usize) -> Self {
-        Self { kind: UnitKind::Connection, bytes_each, child_bytes_each: 0 }
+        Self {
+            kind: UnitKind::Connection,
+            bytes_each,
+            child_bytes_each: 0,
+        }
     }
     /// **两部分都有**：子进程 + 本进程内自己开的缓冲
     ///
@@ -386,7 +394,10 @@ table: T_A
     fn test_connector_specific_params_go_into_properties() {
         let v = spec_with("properties:\n  fetch_size: 20000\n  dmfldr:\n    work_dir: /tmp/x");
         let spec: SourceSpec = serde_json::from_value(v).unwrap();
-        assert_eq!(spec.prop("fetch_size").and_then(|x| x.as_u64()), Some(20000));
+        assert_eq!(
+            spec.prop("fetch_size").and_then(|x| x.as_u64()),
+            Some(20000)
+        );
         assert!(spec.prop("dmfldr").is_some());
         assert_eq!(spec.props().len(), 2);
     }

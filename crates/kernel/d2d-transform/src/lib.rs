@@ -69,6 +69,9 @@ impl TransformChain {
     ///
     /// 供执行路径规划器归因：回落逻辑面时必须能说清「是哪些算子挡了直通」。
     pub fn operator_names(&self) -> Vec<String> {
-        self.operators.iter().map(|op| op.name().to_string()).collect()
+        self.operators
+            .iter()
+            .map(|op| op.name().to_string())
+            .collect()
     }
 }

@@ -121,9 +121,12 @@ impl ConnectorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SinkConnector, SinkSession, SinkSpec, SourceConnector, SourceSpec, SourceSplit, UnitFootprint};
-    use async_trait::async_trait;
+    use crate::{
+        SinkConnector, SinkSession, SinkSpec, SourceConnector, SourceSpec, SourceSplit,
+        UnitFootprint,
+    };
     use arrow::datatypes::SchemaRef;
+    use async_trait::async_trait;
     use d2d_core::{D2DError, D2DResult, RecordBatchStream};
     use d2d_types::{DbTypeDecl, LogicalType, TypeAdapter};
 
@@ -133,8 +136,12 @@ mod tests {
 
     #[async_trait]
     impl SourceConnector for DummySource {
-        fn name(&self) -> &str { "dummy_source" }
-        async fn init(&mut self, _spec: &SourceSpec) -> D2DResult<()> { Ok(()) }
+        fn name(&self) -> &str {
+            "dummy_source"
+        }
+        async fn init(&mut self, _spec: &SourceSpec) -> D2DResult<()> {
+            Ok(())
+        }
         async fn schema(&self) -> D2DResult<SchemaRef> {
             Ok(SchemaRef::new(arrow::datatypes::Schema::empty()))
         }
@@ -144,7 +151,9 @@ mod tests {
         async fn read(&self, _split: &SourceSplit) -> D2DResult<RecordBatchStream> {
             Err(D2DError::not_supported("dummy"))
         }
-        async fn close(&mut self) -> D2DResult<()> { Ok(()) }
+        async fn close(&mut self) -> D2DResult<()> {
+            Ok(())
+        }
 
         // 覆写只为验证"引擎能在 init 之前、经工厂问到它"
         fn unit_footprint(&self, _spec: &SourceSpec) -> UnitFootprint {
@@ -154,16 +163,24 @@ mod tests {
 
     #[async_trait]
     impl SinkConnector for DummySink {
-        fn name(&self) -> &str { "dummy_sink" }
-        async fn init(&mut self, _spec: &SinkSpec) -> D2DResult<()> { Ok(()) }
+        fn name(&self) -> &str {
+            "dummy_sink"
+        }
+        async fn init(&mut self, _spec: &SinkSpec) -> D2DResult<()> {
+            Ok(())
+        }
         async fn begin_session(&self, _spec: &SinkSpec) -> D2DResult<Box<dyn SinkSession>> {
             Err(D2DError::not_supported("dummy"))
         }
-        async fn close(&mut self) -> D2DResult<()> { Ok(()) }
+        async fn close(&mut self) -> D2DResult<()> {
+            Ok(())
+        }
     }
 
     impl TypeAdapter for DummyAdapter {
-        fn db_name(&self) -> &str { "dummy" }
+        fn db_name(&self) -> &str {
+            "dummy"
+        }
         fn to_logical(&self, _decl: &DbTypeDecl) -> D2DResult<LogicalType> {
             Ok(LogicalType::Utf8)
         }

@@ -198,16 +198,26 @@ mod tests {
         }
         assert_eq!(
             a().to_logical_from_str("numeric(38,10)").unwrap(),
-            LogicalType::Decimal { precision: 38, scale: 10 }
+            LogicalType::Decimal {
+                precision: 38,
+                scale: 10
+            }
         );
     }
 
     #[test]
     fn test_timestamp_variants() {
-        let ts = |p| LogicalType::Timestamp { precision: p, tz: None };
-        assert_eq!(a().to_logical_from_str("timestamp(6)").unwrap(), ts(TemporalPrecision::Micro));
+        let ts = |p| LogicalType::Timestamp {
+            precision: p,
+            tz: None,
+        };
         assert_eq!(
-            a().to_logical_from_str("timestamp(3) with time zone").unwrap(),
+            a().to_logical_from_str("timestamp(6)").unwrap(),
+            ts(TemporalPrecision::Micro)
+        );
+        assert_eq!(
+            a().to_logical_from_str("timestamp(3) with time zone")
+                .unwrap(),
             ts(TemporalPrecision::Milli),
             "带时区的也按 UTC 挂钟承载"
         );
@@ -215,7 +225,10 @@ mod tests {
             a().to_logical_from_str("time(3)").unwrap(),
             LogicalType::Time64(TemporalPrecision::Milli)
         );
-        let e = a().to_logical_from_str("time(3) with time zone").unwrap_err().to_string();
+        let e = a()
+            .to_logical_from_str("time(3) with time zone")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("time with time zone"), "{}", e);
     }
 
@@ -229,7 +242,10 @@ mod tests {
             let e = a().to_logical_from_str(decl).unwrap_err().to_string();
             assert!(e.contains(needle), "{} 的报错: {}", decl, e);
         }
-        let e = a().to_logical_from_str("numeric(50,0)").unwrap_err().to_string();
+        let e = a()
+            .to_logical_from_str("numeric(50,0)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("38"), "{}", e);
     }
 
@@ -238,7 +254,10 @@ mod tests {
     fn test_unsigned_widening() {
         assert_eq!(a().to_db_type(&LogicalType::UInt8).unwrap(), "smallint");
         assert_eq!(a().to_db_type(&LogicalType::UInt32).unwrap(), "bigint");
-        assert_eq!(a().to_db_type(&LogicalType::UInt64).unwrap(), "numeric(20,0)");
+        assert_eq!(
+            a().to_db_type(&LogicalType::UInt64).unwrap(),
+            "numeric(20,0)"
+        );
     }
 
     #[test]
@@ -246,12 +265,18 @@ mod tests {
         for ty in [
             LogicalType::Int16,
             LogicalType::Int64,
-            LogicalType::Decimal { precision: 38, scale: 10 },
+            LogicalType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
             LogicalType::Boolean,
             LogicalType::Utf8,
             LogicalType::LargeBinary,
             LogicalType::Date32,
-            LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None },
+            LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: None,
+            },
             LogicalType::Time64(TemporalPrecision::Milli),
             LogicalType::Json,
         ] {

@@ -143,11 +143,7 @@ impl SinkConnector for MysqlSinkConnector {
             .ok_or_else(|| D2DError::config("mysql sink not initialized"))?;
         Ok(Box::new(MysqlSinkSession {
             pool,
-            qualified_table: format!(
-                "{}.{}",
-                quote_ident(&database),
-                quote_ident(&table)
-            ),
+            qualified_table: format!("{}.{}", quote_ident(&database), quote_ident(&table)),
             meter: self.meter.clone(),
             total_rows: 0,
         }))

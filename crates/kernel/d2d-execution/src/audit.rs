@@ -117,7 +117,9 @@ impl RowAudit {
                 got,
                 expect as i64 - got as i64,
                 hint,
-                self.exported.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
+                self.exported
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
                 self.read,
                 self.written,
             ),
@@ -130,7 +132,11 @@ mod tests {
     use super::*;
 
     fn audit(exported: Option<u64>, read: u64, written: u64) -> RowAudit {
-        RowAudit { exported, read, written }
+        RowAudit {
+            exported,
+            read,
+            written,
+        }
     }
 
     /// 两次比较都过 + 源端权威数在 ⟹ 对到头了
@@ -180,22 +186,34 @@ mod tests {
     fn test_transfer_side_still_checked_without_exported() {
         assert!(matches!(
             audit(None, 100, 99).verdict(),
-            Verdict::Mismatch { stage: "搬运/写入侧", .. }
+            Verdict::Mismatch {
+                stage: "搬运/写入侧",
+                ..
+            }
         ));
     }
 
     /// 源端权威数**大于**读出来的、与**小于**它，都要报（方向不敏感）
     #[test]
     fn test_mismatch_is_direction_agnostic() {
-        assert!(matches!(audit(Some(100), 101, 101).verdict(), Verdict::Mismatch { .. }));
-        assert!(matches!(audit(Some(100), 99, 99).verdict(), Verdict::Mismatch { .. }));
+        assert!(matches!(
+            audit(Some(100), 101, 101).verdict(),
+            Verdict::Mismatch { .. }
+        ));
+        assert!(matches!(
+            audit(Some(100), 99, 99).verdict(),
+            Verdict::Mismatch { .. }
+        ));
     }
 
     /// 零行是合法结果，不是"算不出来"
     #[test]
     fn test_zero_rows_is_a_real_verdict() {
         assert_eq!(audit(Some(0), 0, 0).verdict(), Verdict::Pass);
-        assert!(matches!(audit(Some(0), 0, 1).verdict(), Verdict::Mismatch { .. }));
+        assert!(matches!(
+            audit(Some(0), 0, 1).verdict(),
+            Verdict::Mismatch { .. }
+        ));
     }
 
     #[test]

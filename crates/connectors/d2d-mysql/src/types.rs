@@ -95,7 +95,10 @@ impl TypeAdapter for MysqlTypeAdapter {
                         p, s
                     )));
                 }
-                LogicalType::Decimal { precision: p as u8, scale: s as i8 }
+                LogicalType::Decimal {
+                    precision: p as u8,
+                    scale: s as i8,
+                }
             }
             ("DATE", _) => LogicalType::Date32,
             ("DATETIME", _) => LogicalType::Timestamp {
@@ -118,8 +121,11 @@ impl TypeAdapter for MysqlTypeAdapter {
             }
             ("JSON", _) => LogicalType::Json,
             ("ENUM" | "SET", _) => LogicalType::Utf8,
-            ("GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT" | "MULTILINESTRING"
-            | "MULTIPOLYGON" | "GEOMETRYCOLLECTION", _) => {
+            (
+                "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT" | "MULTILINESTRING"
+                | "MULTIPOLYGON" | "GEOMETRYCOLLECTION",
+                _,
+            ) => {
                 return Err(D2DError::schema(format!(
                     "MySQL 空间类型 {} 没有对应的逻辑类型 —— 请先在查询侧转成 WKT 文本",
                     decl.base
@@ -224,23 +230,44 @@ mod tests {
         }
         assert_eq!(
             a().to_logical_from_str("decimal(38,10)").unwrap(),
-            LogicalType::Decimal { precision: 38, scale: 10 }
+            LogicalType::Decimal {
+                precision: 38,
+                scale: 10
+            }
         );
     }
 
     /// 小数位映射：0→秒、1-3→毫秒、4-6→微秒；7+ 报错
     #[test]
     fn test_temporal_fractional_digits() {
-        let ts = |p| LogicalType::Timestamp { precision: p, tz: None };
-        assert_eq!(a().to_logical_from_str("datetime").unwrap(), ts(TemporalPrecision::Second));
-        assert_eq!(a().to_logical_from_str("datetime(3)").unwrap(), ts(TemporalPrecision::Milli));
-        assert_eq!(a().to_logical_from_str("datetime(6)").unwrap(), ts(TemporalPrecision::Micro));
-        assert_eq!(a().to_logical_from_str("timestamp(6)").unwrap(), ts(TemporalPrecision::Micro));
+        let ts = |p| LogicalType::Timestamp {
+            precision: p,
+            tz: None,
+        };
+        assert_eq!(
+            a().to_logical_from_str("datetime").unwrap(),
+            ts(TemporalPrecision::Second)
+        );
+        assert_eq!(
+            a().to_logical_from_str("datetime(3)").unwrap(),
+            ts(TemporalPrecision::Milli)
+        );
+        assert_eq!(
+            a().to_logical_from_str("datetime(6)").unwrap(),
+            ts(TemporalPrecision::Micro)
+        );
+        assert_eq!(
+            a().to_logical_from_str("timestamp(6)").unwrap(),
+            ts(TemporalPrecision::Micro)
+        );
         assert_eq!(
             a().to_logical_from_str("time(3)").unwrap(),
             LogicalType::Time64(TemporalPrecision::Milli)
         );
-        let e = a().to_logical_from_str("datetime(7)").unwrap_err().to_string();
+        let e = a()
+            .to_logical_from_str("datetime(7)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("6 位"), "{}", e);
     }
 
@@ -248,19 +275,28 @@ mod tests {
     #[test]
     fn test_unsigned_changes_type() {
         assert_eq!(a().to_logical_from_str("int").unwrap(), LogicalType::Int32);
-        assert_eq!(a().to_logical_from_str("int unsigned").unwrap(), LogicalType::UInt32);
+        assert_eq!(
+            a().to_logical_from_str("int unsigned").unwrap(),
+            LogicalType::UInt32
+        );
         assert_ne!(
             a().to_logical_from_str("bigint").unwrap(),
             a().to_logical_from_str("bigint unsigned").unwrap()
         );
         // 写回时的写法也要带 UNSIGNED
-        assert_eq!(a().to_db_type(&LogicalType::UInt64).unwrap(), "BIGINT UNSIGNED");
+        assert_eq!(
+            a().to_db_type(&LogicalType::UInt64).unwrap(),
+            "BIGINT UNSIGNED"
+        );
     }
 
     /// 超过 38 位精度的 DECIMAL 必须拒绝，不能截断
     #[test]
     fn test_decimal_over_38_rejected() {
-        let e = a().to_logical_from_str("decimal(65,0)").unwrap_err().to_string();
+        let e = a()
+            .to_logical_from_str("decimal(65,0)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("38"), "{}", e);
     }
 
@@ -275,11 +311,17 @@ mod tests {
         for ty in [
             LogicalType::Int8,
             LogicalType::UInt32,
-            LogicalType::Decimal { precision: 38, scale: 10 },
+            LogicalType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
             LogicalType::Utf8,
             LogicalType::LargeBinary,
             LogicalType::Date32,
-            LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None },
+            LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: None,
+            },
             LogicalType::Time64(TemporalPrecision::Milli),
             LogicalType::Json,
         ] {

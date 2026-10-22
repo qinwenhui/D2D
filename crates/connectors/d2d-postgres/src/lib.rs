@@ -30,8 +30,12 @@ pub fn register(reg: &ConnectorRegistry) {
     reg.register_source_factory(SourceFactory::new("postgres", || {
         Box::new(PgSourceConnector::new())
     }));
-    reg.register_sink_factory(SinkFactory::new("postgres", || Box::new(PgSinkConnector::new())));
-    reg.register_type_adapter(TypeAdapterFactory::new("postgres", || Box::new(PgTypeAdapter::new())));
+    reg.register_sink_factory(SinkFactory::new("postgres", || {
+        Box::new(PgSinkConnector::new())
+    }));
+    reg.register_type_adapter(TypeAdapterFactory::new("postgres", || {
+        Box::new(PgTypeAdapter::new())
+    }));
 }
 
 #[cfg(test)]
@@ -45,8 +49,14 @@ mod tests {
         assert_eq!(reg.list_sources(), vec!["postgres"]);
         assert_eq!(reg.list_sinks(), vec!["postgres"]);
         assert_eq!(reg.list_type_adapters(), vec!["postgres"]);
-        assert_eq!(reg.source_factory("postgres").unwrap().build().name(), "postgres");
-        assert_eq!(reg.sink_factory("postgres").unwrap().build().name(), "postgres");
+        assert_eq!(
+            reg.source_factory("postgres").unwrap().build().name(),
+            "postgres"
+        );
+        assert_eq!(
+            reg.sink_factory("postgres").unwrap().build().name(),
+            "postgres"
+        );
         assert_eq!(reg.type_adapter("postgres").unwrap().db_name(), "postgres");
     }
 }

@@ -2,8 +2,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use std::pin::Pin;
 
-use crate::D2DResult;
 use crate::error::D2DError;
+use crate::D2DResult;
 
 /// 异步 RecordBatch 流
 ///
@@ -63,7 +63,9 @@ impl RecordBatchExt for RecordBatch {
             fields.push(schema.field(idx).clone());
         }
 
-        let new_schema = SchemaRef::new(arrow::datatypes::Schema::new(fields).with_metadata(schema.metadata().clone()));
+        let new_schema = SchemaRef::new(
+            arrow::datatypes::Schema::new(fields).with_metadata(schema.metadata().clone()),
+        );
         Ok(RecordBatch::try_new(new_schema, columns)?)
     }
 
@@ -108,5 +110,4 @@ mod tests {
         assert_eq!(projected.num_columns(), 1);
         assert_eq!(projected.schema().field(0).name(), "name");
     }
-
 }

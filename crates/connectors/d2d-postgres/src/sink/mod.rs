@@ -68,9 +68,20 @@ impl Default for PgSinkConnector {
 /// 目标列类型 → 写入 cast
 fn cast_for(data_type: &str, udt_name: &str) -> D2DResult<Cast> {
     Ok(match data_type {
-        "smallint" | "integer" | "bigint" | "real" | "double precision" | "boolean"
-        | "numeric" | "decimal" | "date" | "time without time zone"
-        | "timestamp without time zone" | "timestamp with time zone" | "json" | "jsonb"
+        "smallint"
+        | "integer"
+        | "bigint"
+        | "real"
+        | "double precision"
+        | "boolean"
+        | "numeric"
+        | "decimal"
+        | "date"
+        | "time without time zone"
+        | "timestamp without time zone"
+        | "timestamp with time zone"
+        | "json"
+        | "jsonb"
         | "uuid" => Cast::Text(data_type.to_string()),
         // text 系：参数本身就是 text，不需要再 cast
         "text" | "character varying" | "character" => Cast::Text("text".to_string()),
@@ -128,16 +139,16 @@ impl SinkConnector for PgSinkConnector {
             let name: String = r.get(0);
             let data_type: String = r.get(1);
             let udt: String = r.get(2);
-            columns.push(TargetColumn { name: name.clone(), cast: cast_for(&data_type, &udt)? });
+            columns.push(TargetColumn {
+                name: name.clone(),
+                cast: cast_for(&data_type, &udt)?,
+            });
         }
         drop(client);
         if columns.is_empty() {
             return Err(D2DError::external(
                 "postgres",
-                format!(
-                    "目标表 \"public\".\"{}\" 不存在或不可见",
-                    spec.table
-                ),
+                format!("目标表 \"public\".\"{}\" 不存在或不可见", spec.table),
             ));
         }
         info!(columns = columns.len(), "目标表结构已取到");
@@ -169,10 +180,7 @@ impl SinkConnector for PgSinkConnector {
         Ok(Box::new(PgSinkSession {
             connection,
             database,
-            qualified_table: format!(
-                "\"public\".{}",
-                d2d_connector::quote_ident(&table)
-            ),
+            qualified_table: format!("\"public\".{}", d2d_connector::quote_ident(&table)),
             columns: self.columns.clone(),
             meter: self.meter.clone(),
             total_rows: 0,
@@ -199,7 +207,9 @@ mod tests {
         assert!(matches!(cast_for("bigint", "int8").unwrap(), Cast::Text(t) if t == "bigint"));
         assert!(matches!(cast_for("numeric", "numeric").unwrap(), Cast::Text(t) if t == "numeric"));
         assert!(matches!(cast_for("bytea", "bytea").unwrap(), Cast::Bytea));
-        assert!(matches!(cast_for("character varying", "varchar").unwrap(), Cast::Text(t) if t == "text"));
+        assert!(
+            matches!(cast_for("character varying", "varchar").unwrap(), Cast::Text(t) if t == "text")
+        );
         assert!(cast_for("ARRAY", "_int4").is_err());
         assert!(cast_for("USER-DEFINED", "my_enum").is_err());
     }

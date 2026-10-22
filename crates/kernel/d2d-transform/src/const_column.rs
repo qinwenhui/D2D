@@ -48,9 +48,7 @@ impl ConstColumn {
             ConstValue::Bool(v) => Arc::new(BooleanArray::from(vec![*v; len])) as ArrayRef,
             ConstValue::Int64(v) => Arc::new(Int64Array::from(vec![*v; len])) as ArrayRef,
             ConstValue::Float64(v) => Arc::new(Float64Array::from(vec![*v; len])) as ArrayRef,
-            ConstValue::Utf8(v) => {
-                Arc::new(StringArray::from(vec![v.as_str(); len])) as ArrayRef
-            }
+            ConstValue::Utf8(v) => Arc::new(StringArray::from(vec![v.as_str(); len])) as ArrayRef,
         }
     }
 
@@ -73,8 +71,12 @@ impl Transform for ConstColumn {
         let array = self.build_array(len);
 
         // 追加到现有列之后
-        let mut fields: Vec<Field> =
-            input.schema().fields().iter().map(|f| (**f).clone()).collect();
+        let mut fields: Vec<Field> = input
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| (**f).clone())
+            .collect();
         let mut columns = Vec::with_capacity(fields.len() + 1);
         for c in input.columns() {
             columns.push(Arc::clone(c) as ArrayRef);
@@ -83,7 +85,8 @@ impl Transform for ConstColumn {
         fields.push(Field::new(&self.name, self.data_type(), true));
         columns.push(array);
 
-        let schema = SchemaRef::new(Schema::new(fields).with_metadata(input.schema().metadata().clone()));
+        let schema =
+            SchemaRef::new(Schema::new(fields).with_metadata(input.schema().metadata().clone()));
         Ok(RecordBatch::try_new(schema, columns)?)
     }
 
@@ -98,8 +101,16 @@ mod tests {
 
     fn input_batch(rows: usize) -> RecordBatch {
         use arrow::array::Int32Array;
-        let schema = Arc::new(Schema::new(vec![Field::new("id", arrow::datatypes::DataType::Int32, false)]));
-        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from_iter_values(0..rows as i32))]).unwrap()
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            arrow::datatypes::DataType::Int32,
+            false,
+        )]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from_iter_values(0..rows as i32))],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -109,7 +120,10 @@ mod tests {
         assert_eq!(out.num_columns(), 2);
         assert_eq!(out.schema().field(1).name(), "flag");
         let col = out.column(1);
-        let arr = col.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        let arr = col
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
         assert_eq!(arr.value(0), 1);
         assert_eq!(arr.len(), 3);
     }

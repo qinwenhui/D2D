@@ -61,11 +61,16 @@ impl CastTable {
             (L::Int8, L::Int16 | L::Int32 | L::Int64) => CastPolicy::Widen,
             (L::Int16, L::Int32 | L::Int64) => CastPolicy::Widen,
             (L::Int32, L::Int64) => CastPolicy::Widen,
-            (L::Int8 | L::Int16 | L::Int32 | L::Int64, L::UInt8 | L::UInt16 | L::UInt32 | L::UInt64) => {
+            (
+                L::Int8 | L::Int16 | L::Int32 | L::Int64,
+                L::UInt8 | L::UInt16 | L::UInt32 | L::UInt64,
+            ) => {
                 if Self::uint_covers(from, to) {
                     CastPolicy::Widen
                 } else {
-                    CastPolicy::Lossy { risk: "有符号转无符号：负值将回绕" }
+                    CastPolicy::Lossy {
+                        risk: "有符号转无符号：负值将回绕",
+                    }
                 }
             }
             (L::UInt8, L::UInt16 | L::UInt32 | L::UInt64) => CastPolicy::Widen,
@@ -75,58 +80,89 @@ impl CastTable {
             // ── 整型收窄：有损（截断） ──
             (L::Int64, L::Int32 | L::Int16 | L::Int8)
             | (L::Int32, L::Int16 | L::Int8)
-            | (L::Int16, L::Int8) => CastPolicy::Lossy { risk: "整型收窄：超出目标范围将被截断" },
+            | (L::Int16, L::Int8) => CastPolicy::Lossy {
+                risk: "整型收窄：超出目标范围将被截断",
+            },
             (L::UInt64, L::UInt32 | L::UInt16 | L::UInt8)
             | (L::UInt32, L::UInt16 | L::UInt8)
-            | (L::UInt16, L::UInt8) => {
-                CastPolicy::Lossy { risk: "无符号整型收窄：超出目标范围将被截断" }
-            }
+            | (L::UInt16, L::UInt8) => CastPolicy::Lossy {
+                risk: "无符号整型收窄：超出目标范围将被截断",
+            },
 
             // ── 整数 → 浮点 ──
-            (L::Int8 | L::Int16 | L::UInt8 | L::UInt16, L::Float32 | L::Float64) => CastPolicy::Widen,
+            (L::Int8 | L::Int16 | L::UInt8 | L::UInt16, L::Float32 | L::Float64) => {
+                CastPolicy::Widen
+            }
             (L::Int32 | L::UInt32, L::Float64) => CastPolicy::Widen,
-            (L::Int32 | L::UInt32, L::Float32) => {
-                CastPolicy::Lossy { risk: "32 位整数转 Float32：超过 2^24 精度丢失" }
-            }
-            (L::Int64 | L::UInt64, L::Float32 | L::Float64) => {
-                CastPolicy::Lossy { risk: "64 位整数转浮点：大整数精度丢失" }
-            }
+            (L::Int32 | L::UInt32, L::Float32) => CastPolicy::Lossy {
+                risk: "32 位整数转 Float32：超过 2^24 精度丢失",
+            },
+            (L::Int64 | L::UInt64, L::Float32 | L::Float64) => CastPolicy::Lossy {
+                risk: "64 位整数转浮点：大整数精度丢失",
+            },
 
             // ── 浮点 → 浮点 ──
             (L::Float32, L::Float64) => CastPolicy::Widen,
-            (L::Float64, L::Float32) => CastPolicy::Lossy { risk: "双精度转单精度：精度与范围下降" },
+            (L::Float64, L::Float32) => CastPolicy::Lossy {
+                risk: "双精度转单精度：精度与范围下降",
+            },
 
             // ── 整数 → Decimal ──
             (L::Int8 | L::Int16 | L::Int32, L::Decimal { .. }) => CastPolicy::Widen,
-            (L::Int64 | L::UInt32 | L::UInt64, L::Decimal { .. }) => {
-                CastPolicy::Lossy { risk: "宽整数转 Decimal：需确认目标精度容得下极值" }
-            }
+            (L::Int64 | L::UInt32 | L::UInt64, L::Decimal { .. }) => CastPolicy::Lossy {
+                risk: "宽整数转 Decimal：需确认目标精度容得下极值",
+            },
 
             // ── 浮点 → Decimal ──
-            (L::Float32 | L::Float64, L::Decimal { .. }) => {
-                CastPolicy::Lossy { risk: "浮点转定点：二进制近似值落入十进制标度，结果取决于具体值" }
-            }
+            (L::Float32 | L::Float64, L::Decimal { .. }) => CastPolicy::Lossy {
+                risk: "浮点转定点：二进制近似值落入十进制标度，结果取决于具体值",
+            },
 
             // ── Decimal → 数值 ──
-            (L::Decimal { .. }, L::Int8 | L::Int16 | L::Int32 | L::Int64 | L::UInt8 | L::UInt16 | L::UInt32 | L::UInt64) => {
-                CastPolicy::Lossy { risk: "定点转整数：可能溢出或小数截断" }
-            }
-            (L::Decimal { .. }, L::Float32 | L::Float64) => {
-                CastPolicy::Lossy { risk: "定点转浮点：高精度十进制值可能无法精确表示" }
-            }
-            (L::Decimal { precision: p1, scale: s1 }, L::Decimal { precision: p2, scale: s2 }) => {
+            (
+                L::Decimal { .. },
+                L::Int8
+                | L::Int16
+                | L::Int32
+                | L::Int64
+                | L::UInt8
+                | L::UInt16
+                | L::UInt32
+                | L::UInt64,
+            ) => CastPolicy::Lossy {
+                risk: "定点转整数：可能溢出或小数截断",
+            },
+            (L::Decimal { .. }, L::Float32 | L::Float64) => CastPolicy::Lossy {
+                risk: "定点转浮点：高精度十进制值可能无法精确表示",
+            },
+            (
+                L::Decimal {
+                    precision: p1,
+                    scale: s1,
+                },
+                L::Decimal {
+                    precision: p2,
+                    scale: s2,
+                },
+            ) => {
                 if p2 >= p1 && s2 >= s1 {
                     CastPolicy::Widen
                 } else if p2 >= p1 && s2 < s1 {
-                    CastPolicy::Lossy { risk: "DECIMAL 标度收窄：小数部分被截断" }
+                    CastPolicy::Lossy {
+                        risk: "DECIMAL 标度收窄：小数部分被截断",
+                    }
                 } else {
-                    CastPolicy::Lossy { risk: "DECIMAL 精度/标度不足：可能溢出或截断" }
+                    CastPolicy::Lossy {
+                        risk: "DECIMAL 精度/标度不足：可能溢出或截断",
+                    }
                 }
             }
 
             // ── 字符串 → 字符串 ──
             (L::Utf8, L::LargeUtf8) => CastPolicy::Widen,
-            (L::LargeUtf8, L::Utf8) => CastPolicy::Lossy { risk: "大文本转普通文本：长度可能超限" },
+            (L::LargeUtf8, L::Utf8) => CastPolicy::Lossy {
+                risk: "大文本转普通文本：长度可能超限",
+            },
 
             // ── 二进制 ↔ 字符串：显式禁止（乱码风险） ──
             (L::Binary | L::LargeBinary, L::Utf8 | L::LargeUtf8) => CastPolicy::Forbidden {
@@ -136,12 +172,20 @@ impl CastTable {
                 reason: "字符串转二进制需显式声明编码方式（如 Base64）",
             },
             (L::Binary, L::LargeBinary) => CastPolicy::Widen,
-            (L::LargeBinary, L::Binary) => CastPolicy::Lossy { risk: "大二进制转普通二进制：长度可能超限" },
+            (L::LargeBinary, L::Binary) => CastPolicy::Lossy {
+                risk: "大二进制转普通二进制：长度可能超限",
+            },
 
             // ── 时间戳精度/时区调整 ──
             (
-                L::Timestamp { precision: p1, tz: t1 },
-                L::Timestamp { precision: p2, tz: t2 },
+                L::Timestamp {
+                    precision: p1,
+                    tz: t1,
+                },
+                L::Timestamp {
+                    precision: p2,
+                    tz: t2,
+                },
             ) => Self::temporal_precision_policy(p1, p2, t1.is_some(), t2.is_some()),
 
             // ── 时间类型之间：一律禁止隐式转换 ──
@@ -156,14 +200,22 @@ impl CastTable {
             },
 
             // ── 布尔 / 枚举 / JSON / 复杂类型：仅等价或显式禁止 ──
-            (L::Boolean, _) => CastPolicy::Forbidden { reason: "BOOLEAN 不支持隐式转为其他类型" },
-            (_, L::Boolean) => CastPolicy::Forbidden { reason: "其他类型不支持隐式转为 BOOLEAN" },
-            (L::Enum(_), _) => CastPolicy::Forbidden { reason: "ENUM 需先显式映射为字符串" },
+            (L::Boolean, _) => CastPolicy::Forbidden {
+                reason: "BOOLEAN 不支持隐式转为其他类型",
+            },
+            (_, L::Boolean) => CastPolicy::Forbidden {
+                reason: "其他类型不支持隐式转为 BOOLEAN",
+            },
+            (L::Enum(_), _) => CastPolicy::Forbidden {
+                reason: "ENUM 需先显式映射为字符串",
+            },
             (L::Json, _) | (_, L::Json) => CastPolicy::Forbidden {
                 reason: "JSON 与标量间的转换需显式声明序列化格式",
             },
             (L::Null, _) => CastPolicy::Widen, // 空列可充当任何类型
-            (_, L::Null) => CastPolicy::Lossy { risk: "非空列转空列：所有数据将丢失" },
+            (_, L::Null) => CastPolicy::Lossy {
+                risk: "非空列转空列：所有数据将丢失",
+            },
 
             (L::List(a), L::List(b)) => Self::policy(a, b),
             (L::Struct(fa), L::Struct(fb)) if fa.len() == fb.len() => {
@@ -225,7 +277,9 @@ impl CastTable {
         if rank(to) >= rank(from) {
             CastPolicy::Widen
         } else {
-            CastPolicy::Lossy { risk: "时间精度收窄：亚秒信息被截断" }
+            CastPolicy::Lossy {
+                risk: "时间精度收窄：亚秒信息被截断",
+            }
         }
     }
 
@@ -270,17 +324,35 @@ mod tests {
     #[test]
     fn test_temporal_cross_forbidden() {
         // 时间类型之间禁止隐式互转
-        let p = CastTable::policy(&LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None }, &LogicalType::Date32);
+        let p = CastTable::policy(
+            &LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: None,
+            },
+            &LogicalType::Date32,
+        );
         assert!(!p.is_allowed());
-        let p2 = CastTable::policy(&LogicalType::Date32, &LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None });
+        let p2 = CastTable::policy(
+            &LogicalType::Date32,
+            &LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: None,
+            },
+        );
         assert!(!p2.is_allowed());
     }
 
     #[test]
     fn test_decimal_scale_narrow_lossy() {
         let p = CastTable::policy(
-            &LogicalType::Decimal { precision: 38, scale: 10 },
-            &LogicalType::Decimal { precision: 19, scale: 4 },
+            &LogicalType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+            &LogicalType::Decimal {
+                precision: 19,
+                scale: 4,
+            },
         );
         assert!(matches!(p, CastPolicy::Lossy { .. }));
     }
@@ -288,8 +360,14 @@ mod tests {
     #[test]
     fn test_tz_change_lossy() {
         let p = CastTable::policy(
-            &LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None },
-            &LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: Some(crate::FixedOffset::cst()) },
+            &LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: None,
+            },
+            &LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: Some(crate::FixedOffset::cst()),
+            },
         );
         assert!(matches!(p, CastPolicy::Lossy { .. }));
     }
@@ -297,8 +375,14 @@ mod tests {
     #[test]
     fn test_precision_widen_ok() {
         let p = CastTable::policy(
-            &LogicalType::Timestamp { precision: TemporalPrecision::Second, tz: None },
-            &LogicalType::Timestamp { precision: TemporalPrecision::Nano, tz: None },
+            &LogicalType::Timestamp {
+                precision: TemporalPrecision::Second,
+                tz: None,
+            },
+            &LogicalType::Timestamp {
+                precision: TemporalPrecision::Nano,
+                tz: None,
+            },
         );
         assert!(p.is_lossless());
     }

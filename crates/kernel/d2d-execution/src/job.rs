@@ -49,11 +49,7 @@ pub struct Job {
 
 impl Job {
     /// 起一个 builder。源与目标是必填，其余有合理缺省。
-    pub fn builder(
-        name: impl Into<String>,
-        source: SourceSpec,
-        sink: SinkSpec,
-    ) -> JobBuilder {
+    pub fn builder(name: impl Into<String>, source: SourceSpec, sink: SinkSpec) -> JobBuilder {
         JobBuilder {
             name: name.into(),
             source,
@@ -211,7 +207,12 @@ mod tests {
             .unwrap();
         assert!(job.direct.preflight_scan);
         // 缺省仍然是保守的那一档
-        assert!(!Job::builder("y", src(), snk()).build().unwrap().direct.preflight_scan);
+        assert!(
+            !Job::builder("y", src(), snk())
+                .build()
+                .unwrap()
+                .direct
+                .preflight_scan
+        );
     }
-
 }

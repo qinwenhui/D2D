@@ -38,8 +38,12 @@ pub fn register(reg: &ConnectorRegistry) {
     reg.register_source_factory(SourceFactory::new("mysql", || {
         Box::new(MysqlSourceConnector::new())
     }));
-    reg.register_sink_factory(SinkFactory::new("mysql", || Box::new(MysqlSinkConnector::new())));
-    reg.register_type_adapter(TypeAdapterFactory::new("mysql", || Box::new(MysqlTypeAdapter::new())));
+    reg.register_sink_factory(SinkFactory::new("mysql", || {
+        Box::new(MysqlSinkConnector::new())
+    }));
+    reg.register_type_adapter(TypeAdapterFactory::new("mysql", || {
+        Box::new(MysqlTypeAdapter::new())
+    }));
 }
 
 #[cfg(test)]

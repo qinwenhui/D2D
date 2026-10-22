@@ -9,10 +9,10 @@
 //! 退回结果集元数据的协议类型码（[`crate::wire`]），并明确告诉用户那条路有损。
 
 use crate::wire;
+use arrow::datatypes::{Field, SchemaRef};
 use d2d_connector::{QueryConfig, SourceSpec, TypeContractColumn};
 use d2d_core::{D2DError, D2DResult};
 use d2d_types::{LogicalArrowBridge, LogicalType, TypeAdapter};
-use arrow::datatypes::{Field, SchemaRef};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row};
 use std::collections::HashMap;
@@ -108,10 +108,9 @@ pub async fn resolve_schema(
 
     let builder = super::sql::MysqlSqlBuilder::new(Some(database), &spec.table);
     let probe_sql = builder.build_query(query, "");
-    let qr = conn
-        .query_iter(&probe_sql)
-        .await
-        .map_err(|e| D2DError::external("mysql", format!("schema 探测失败（{}）: {}", probe_sql, e)))?;
+    let qr = conn.query_iter(&probe_sql).await.map_err(|e| {
+        D2DError::external("mysql", format!("schema 探测失败（{}）: {}", probe_sql, e))
+    })?;
     let cols = qr.columns_ref().to_vec();
     drop(qr);
     if cols.is_empty() {
@@ -146,7 +145,11 @@ pub async fn resolve_schema(
             )
         };
         debug!(column = %name, declared = %decl, source, logical = %lt.describe(), "列类型已定");
-        fields.push(Field::new(&name, LogicalArrowBridge::to_arrow(&lt)?, nullable));
+        fields.push(Field::new(
+            &name,
+            LogicalArrowBridge::to_arrow(&lt)?,
+            nullable,
+        ));
         logical.push(lt);
     }
 

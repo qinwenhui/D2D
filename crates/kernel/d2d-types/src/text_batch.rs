@@ -244,9 +244,7 @@ impl RowBuilder {
                 None => self.cols[i].append_null(),
                 // dmfldr 的 NULL 是**字面量**（NULL_MODE），ODBC/Doris 的 NULL 是 None
                 // —— 两条路都收，判定规则在 is_null_field 一处
-                Some(b) if self.opts.null.matches(b) => {
-                    self.cols[i].append_null()
-                }
+                Some(b) if self.opts.null.matches(b) => self.cols[i].append_null(),
                 Some(b) => {
                     append_cell(
                         &self.opts,
@@ -323,9 +321,15 @@ impl ColBuilder {
             DataType::Int32 => Self::Int32(PrimitiveBuilder::<Int32Type>::with_capacity(capacity)),
             DataType::Int64 => Self::Int64(PrimitiveBuilder::<Int64Type>::with_capacity(capacity)),
             DataType::UInt8 => Self::UInt8(PrimitiveBuilder::<UInt8Type>::with_capacity(capacity)),
-            DataType::UInt16 => Self::UInt16(PrimitiveBuilder::<UInt16Type>::with_capacity(capacity)),
-            DataType::UInt32 => Self::UInt32(PrimitiveBuilder::<UInt32Type>::with_capacity(capacity)),
-            DataType::UInt64 => Self::UInt64(PrimitiveBuilder::<UInt64Type>::with_capacity(capacity)),
+            DataType::UInt16 => {
+                Self::UInt16(PrimitiveBuilder::<UInt16Type>::with_capacity(capacity))
+            }
+            DataType::UInt32 => {
+                Self::UInt32(PrimitiveBuilder::<UInt32Type>::with_capacity(capacity))
+            }
+            DataType::UInt64 => {
+                Self::UInt64(PrimitiveBuilder::<UInt64Type>::with_capacity(capacity))
+            }
             DataType::Float32 => {
                 Self::Float32(PrimitiveBuilder::<Float32Type>::with_capacity(capacity))
             }
@@ -345,7 +349,9 @@ impl ColBuilder {
             DataType::LargeBinary => {
                 Self::LargeBinary(LargeBinaryBuilder::with_capacity(capacity, capacity * 16))
             }
-            DataType::Date32 => Self::Date32(PrimitiveBuilder::<Date32Type>::with_capacity(capacity)),
+            DataType::Date32 => {
+                Self::Date32(PrimitiveBuilder::<Date32Type>::with_capacity(capacity))
+            }
             DataType::Time64(_) => Self::Time64I64(Int64Builder::with_capacity(capacity)),
             DataType::Timestamp(TimeUnit::Second, tz) => {
                 Self::TsSecond(ts_builder::<TimestampSecondType>(capacity, tz))
@@ -452,7 +458,8 @@ fn append_cell(
     // 时间列：builder 与逻辑类型需同时决定，先解析值再按 builder 追加
     if lt.is_temporal() {
         let s = trimmed_str(field).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?;
-        let v = parse_temporal_to_i64(s, lt).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?;
+        let v =
+            parse_temporal_to_i64(s, lt).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?;
         match builder {
             ColBuilder::Date32(b) => b.append_value(v as i32),
             ColBuilder::Time64I64(b) => b.append_value(v),
@@ -466,28 +473,36 @@ fn append_cell(
     }
     match (builder, lt) {
         (ColBuilder::Int8(b), _) => b.append_value(
-            parse_int::<i8>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<i8>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::Int16(b), _) => b.append_value(
-            parse_int::<i16>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<i16>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::Int32(b), _) => b.append_value(
-            parse_int::<i32>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<i32>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::Int64(b), _) => b.append_value(
-            parse_int::<i64>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<i64>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::UInt8(b), _) => b.append_value(
-            parse_int::<u8>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<u8>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::UInt16(b), _) => b.append_value(
-            parse_int::<u16>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<u16>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::UInt32(b), _) => b.append_value(
-            parse_int::<u32>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<u32>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::UInt64(b), _) => b.append_value(
-            parse_int::<u64>(field, col_name).map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
+            parse_int::<u64>(field, col_name)
+                .map_err(|m| ctx_err(line_no, col_name, raw_line, &m))?,
         ),
         (ColBuilder::Float32(b), _) => b.append_value(
             parse_float::<f32>(field, col_name)
@@ -571,10 +586,7 @@ impl ColBuilder {
 /// 错误上下文：有原始行文本就带上（dmfldr），没有就只报行列（ODBC / Doris 协议）
 fn ctx_err(line_no: usize, col: &str, raw: &[u8], msg: &str) -> D2DError {
     if raw.is_empty() {
-        return D2DError::schema(format!(
-            "解析失败：第 {} 行 列 '{}'：{}",
-            line_no, col, msg
-        ));
+        return D2DError::schema(format!("解析失败：第 {} 行 列 '{}'：{}", line_no, col, msg));
     }
     let preview: String = String::from_utf8_lossy(&raw[..raw.len().min(64)]).replace('\n', "\\n");
     D2DError::schema(format!(
@@ -743,8 +755,15 @@ pub fn read_lob_bytes(lob_dir: &std::path::Path, reference: &str) -> Result<Vec<
     f.seek(SeekFrom::Start(off))
         .map_err(|e| format!("LOB 文件 {} seek({}) 失败: {}", path.display(), off, e))?;
     let mut buf = vec![0u8; len as usize];
-    std::io::Read::read_exact(&mut f, &mut buf)
-        .map_err(|e| format!("LOB 文件 {} read({}@{}) 失败: {}", path.display(), len, off, e))?;
+    std::io::Read::read_exact(&mut f, &mut buf).map_err(|e| {
+        format!(
+            "LOB 文件 {} read({}@{}) 失败: {}",
+            path.display(),
+            len,
+            off,
+            e
+        )
+    })?;
     Ok(buf)
 }
 
@@ -896,8 +915,13 @@ mod tests {
 
     fn build(types: &[(&str, LogicalType)], rows: &[&[Option<&[u8]>]]) -> RecordBatch {
         let (schema, logical) = schema_of(types);
-        let mut rb =
-            RowBuilder::new(schema, logical, RowBuildOptions::mysql_protocol(), rows.len()).unwrap();
+        let mut rb = RowBuilder::new(
+            schema,
+            logical,
+            RowBuildOptions::mysql_protocol(),
+            rows.len(),
+        )
+        .unwrap();
         for (i, r) in rows.iter().enumerate() {
             rb.append_row(r, i as u64).unwrap();
         }
@@ -912,7 +936,13 @@ mod tests {
             &[
                 ("id", LogicalType::Int64),
                 ("name", LogicalType::Utf8),
-                ("amt", LogicalType::Decimal { precision: 10, scale: 2 }),
+                (
+                    "amt",
+                    LogicalType::Decimal {
+                        precision: 10,
+                        scale: 2,
+                    },
+                ),
                 ("flag", LogicalType::Boolean),
             ],
             &[
@@ -922,16 +952,32 @@ mod tests {
             ],
         );
         assert_eq!(batch.num_rows(), 2);
-        let ids = batch.column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
         assert_eq!(ids.value(0), 1);
         assert_eq!(ids.value(1), 2);
-        let names = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let names = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(names.value(0), "alice");
         assert!(names.is_null(1));
-        let amts = batch.column(2).as_any().downcast_ref::<Decimal128Array>().unwrap();
+        let amts = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
         assert_eq!(amts.value(0), 1234);
         assert_eq!(amts.value(1), -50);
-        let flags = batch.column(3).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+        let flags = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
         assert!(flags.value(0));
         assert!(!flags.value(1));
     }
@@ -941,7 +987,11 @@ mod tests {
     fn test_null_rule_distinguishes_empty_string_from_null() {
         // MySQL/Doris：'' 是真值，只有协议给的 None 才是 NULL
         let batch = build(&[("s", LogicalType::Utf8)], &[&[Some(b"")], &[None]]);
-        let s = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let s = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(s.value(0), "");
         assert!(!s.is_null(0), "Doris 口径下空串不是 NULL");
         assert!(s.is_null(1));
@@ -953,7 +1003,11 @@ mod tests {
         rb.append_row(&[Some(b"")], 0).unwrap();
         let b = rb.finish().unwrap();
         assert!(
-            b.column(0).as_any().downcast_ref::<StringArray>().unwrap().is_null(0),
+            b.column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .is_null(0),
             "达梦口径下空串必须落成 NULL"
         );
     }
@@ -983,7 +1037,13 @@ mod tests {
 
     #[test]
     fn test_decimal_scale_overflow_rejected() {
-        let (schema, logical) = schema_of(&[("amt", LogicalType::Decimal { precision: 5, scale: 2 })]);
+        let (schema, logical) = schema_of(&[(
+            "amt",
+            LogicalType::Decimal {
+                precision: 5,
+                scale: 2,
+            },
+        )]);
         let mut rb =
             RowBuilder::new(schema, logical, RowBuildOptions::mysql_protocol(), 1).unwrap();
         let e = rb.append_row(&[Some(b"1.234")], 0).unwrap_err().to_string();
@@ -992,14 +1052,36 @@ mod tests {
 
     #[test]
     fn test_decimal_precision_overflow_rejected() {
-        let (schema, logical) = schema_of(&[("amt", LogicalType::Decimal { precision: 4, scale: 2 })]);
+        let (schema, logical) = schema_of(&[(
+            "amt",
+            LogicalType::Decimal {
+                precision: 4,
+                scale: 2,
+            },
+        )]);
         let mut rb =
             RowBuilder::new(schema, logical, RowBuildOptions::mysql_protocol(), 1).unwrap();
         // 整数 3 位 + scale 2 = 5 > precision 4
-        let e = rb.append_row(&[Some(b"123.45")], 0).unwrap_err().to_string();
+        let e = rb
+            .append_row(&[Some(b"123.45")], 0)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("precision"), "{}", e);
         // 前导零不算有效位
-        assert!(build(&[("amt", LogicalType::Decimal { precision: 4, scale: 2 })], &[&[Some(b"001.23")]]).num_rows() == 1);
+        assert!(
+            build(
+                &[(
+                    "amt",
+                    LogicalType::Decimal {
+                        precision: 4,
+                        scale: 2
+                    }
+                )],
+                &[&[Some(b"001.23")]]
+            )
+            .num_rows()
+                == 1
+        );
     }
 
     #[test]
@@ -1143,7 +1225,11 @@ mod tests {
             &[("t", LogicalType::Time64(TemporalPrecision::Micro))],
             &[&[Some(b"01:02:03.000004")]],
         );
-        let t = batch.column(0).as_any().downcast_ref::<Time64MicrosecondArray>().unwrap();
+        let t = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Time64MicrosecondArray>()
+            .unwrap();
         assert_eq!(t.value(0), 3_723_000_004);
     }
 
@@ -1171,10 +1257,7 @@ mod tests {
 
     #[test]
     fn test_lob_inline_takes_bytes_verbatim() {
-        let batch = build(
-            &[("b", LogicalType::Binary)],
-            &[&[Some(b"\x00\x01\xff")]],
-        );
+        let batch = build(&[("b", LogicalType::Binary)], &[&[Some(b"\x00\x01\xff")]]);
         let b = batch
             .column(0)
             .as_any()
@@ -1187,8 +1270,12 @@ mod tests {
     #[test]
     fn test_lob_unsupported_by_default() {
         let (schema, logical) = schema_of(&[("b", LogicalType::LargeBinary)]);
-        let mut rb = RowBuilder::new(schema, logical, RowBuildOptions::dameng_default(), 1).unwrap();
-        let e = rb.append_row(&[Some(b"whatever")], 0).unwrap_err().to_string();
+        let mut rb =
+            RowBuilder::new(schema, logical, RowBuildOptions::dameng_default(), 1).unwrap();
+        let e = rb
+            .append_row(&[Some(b"whatever")], 0)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("LOB"), "{}", e);
         assert!(e.contains("dmfldr"), "要指出出路: {}", e);
     }
@@ -1197,10 +1284,16 @@ mod tests {
 
     #[test]
     fn test_decode_text_encodings() {
-        assert_eq!(decode_text("中文".as_bytes(), TextEncoding::Utf8, "c").unwrap(), "中文");
+        assert_eq!(
+            decode_text("中文".as_bytes(), TextEncoding::Utf8, "c").unwrap(),
+            "中文"
+        );
         assert!(decode_text(&[0xff, 0xfe], TextEncoding::Utf8, "c").is_err());
         // Latin-1 逐字节可逆
-        assert_eq!(decode_text(&[0x41, 0xE9], TextEncoding::SingleByte, "c").unwrap(), "Aé");
+        assert_eq!(
+            decode_text(&[0x41, 0xE9], TextEncoding::SingleByte, "c").unwrap(),
+            "Aé"
+        );
         let (gbk, _, _) = encoding_rs::GBK.encode("中文");
         assert_eq!(decode_text(&gbk, TextEncoding::Gbk, "c").unwrap(), "中文");
     }
@@ -1215,7 +1308,10 @@ mod tests {
         // 无小数点时补零到 scale
         assert_eq!(parse_decimal_i128("7", 10, 4).unwrap(), 70000);
         assert!(parse_decimal_i128("", 10, 2).is_err());
-        assert!(parse_decimal_i128("1e5", 10, 2).is_err(), "科学计数法不是定点数写法");
+        assert!(
+            parse_decimal_i128("1e5", 10, 2).is_err(),
+            "科学计数法不是定点数写法"
+        );
         assert!(parse_decimal_i128("1.2.3", 10, 2).is_err());
     }
 
@@ -1271,7 +1367,13 @@ mod tests {
     #[test]
     fn test_timestamp_array_materialized_correctly() {
         let batch = build(
-            &[("t", LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None })],
+            &[(
+                "t",
+                LogicalType::Timestamp {
+                    precision: TemporalPrecision::Micro,
+                    tz: None,
+                },
+            )],
             &[&[Some(b"2023-10-08 16:43:57")]],
         );
         let t = batch

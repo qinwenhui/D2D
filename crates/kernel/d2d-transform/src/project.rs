@@ -27,7 +27,9 @@ impl Project {
                 .fields()
                 .iter()
                 .position(|f| f.name() == name)
-                .ok_or_else(|| d2d_core::D2DError::schema(format!("project column '{}' not found", name)))?;
+                .ok_or_else(|| {
+                    d2d_core::D2DError::schema(format!("project column '{}' not found", name))
+                })?;
             indices.push(idx);
         }
         self.column_indices = indices;

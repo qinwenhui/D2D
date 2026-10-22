@@ -18,10 +18,10 @@
 //! 与共享解析器的格式一致。
 
 use crate::types::PgTypeAdapter;
+use arrow::datatypes::{Field, SchemaRef};
 use d2d_connector::{QueryColumn, QueryConfig, SourceSpec, TypeContractColumn};
 use d2d_core::{D2DError, D2DResult};
 use d2d_types::{LogicalArrowBridge, LogicalType, TypeAdapter};
-use arrow::datatypes::{Field, SchemaRef};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::Client;
@@ -66,7 +66,9 @@ pub async fn describe_table(
             &[&schema, &table],
         )
         .await
-        .map_err(|e| D2DError::external("postgres", format!("读 information_schema 失败: {}", e)))?;
+        .map_err(|e| {
+            D2DError::external("postgres", format!("读 information_schema 失败: {}", e))
+        })?;
     let out: Vec<DescribedColumn> = rows
         .iter()
         .map(|r| DescribedColumn {
@@ -166,8 +168,10 @@ pub async fn resolve_schema(
     query: &QueryConfig,
 ) -> D2DResult<ResolvedSchema> {
     let described = describe_table(client, schema, &spec.table).await?;
-    let by_name: HashMap<String, &DescribedColumn> =
-        described.iter().map(|c| (c.name.to_lowercase(), c)).collect();
+    let by_name: HashMap<String, &DescribedColumn> = described
+        .iter()
+        .map(|c| (c.name.to_lowercase(), c))
+        .collect();
     debug!(table = %spec.table, columns = described.len(), "PostgreSQL 表结构已取到");
 
     struct Out<'a> {
@@ -190,7 +194,11 @@ pub async fn resolve_schema(
                         };
                         outs.push(Out {
                             name: n.clone(),
-                            item: select_item(&d2d_connector::quote_ident(&d.name), select_kind(d), n),
+                            item: select_item(
+                                &d2d_connector::quote_ident(&d.name),
+                                select_kind(d),
+                                n,
+                            ),
                             described: Some(d),
                         });
                     }
@@ -209,20 +217,34 @@ pub async fn resolve_schema(
             for d in &described {
                 outs.push(Out {
                     name: d.name.clone(),
-                    item: select_item(&d2d_connector::quote_ident(&d.name), select_kind(d), &d.name),
+                    item: select_item(
+                        &d2d_connector::quote_ident(&d.name),
+                        select_kind(d),
+                        &d.name,
+                    ),
                     described: Some(d),
                 });
             }
         }
     }
 
-    let select_list = outs.iter().map(|o| o.item.clone()).collect::<Vec<_>>().join(",\n  ");
-    let probe_sql = crate::sql::PgSqlBuilder::new(Some(schema), &spec.table)
-        .build_query(&select_list, query, "");
+    let select_list = outs
+        .iter()
+        .map(|o| o.item.clone())
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    let probe_sql = crate::sql::PgSqlBuilder::new(Some(schema), &spec.table).build_query(
+        &select_list,
+        query,
+        "",
+    );
 
     // `prepare` 只解析/规划，不取数 —— 拿结果集类型足够
     let stmt = client.prepare(&probe_sql).await.map_err(|e| {
-        D2DError::external("postgres", format!("schema 探测失败（{}）: {}", probe_sql, e))
+        D2DError::external(
+            "postgres",
+            format!("schema 探测失败（{}）: {}", probe_sql, e),
+        )
     })?;
     let cols = stmt.columns();
     if cols.len() != outs.len() {
@@ -253,7 +275,11 @@ pub async fn resolve_schema(
             (type_from_oid(cols[i].type_(), &out.name)?, true)
         };
         debug!(column = %out.name, logical = %lt.describe(), "列类型已定");
-        fields.push(Field::new(&out.name, LogicalArrowBridge::to_arrow(&lt)?, nullable));
+        fields.push(Field::new(
+            &out.name,
+            LogicalArrowBridge::to_arrow(&lt)?,
+            nullable,
+        ));
         logical.push(lt);
         bytea_columns.push(
             out.described
@@ -315,7 +341,13 @@ fn type_from_oid(t: &tokio_postgres::types::Type, col: &str) -> D2DResult<Logica
 mod tests {
     use super::*;
 
-    fn c(dt: &str, len: Option<i32>, np: Option<i32>, ns: Option<i32>, dp: Option<i32>) -> DescribedColumn {
+    fn c(
+        dt: &str,
+        len: Option<i32>,
+        np: Option<i32>,
+        ns: Option<i32>,
+        dp: Option<i32>,
+    ) -> DescribedColumn {
         DescribedColumn {
             name: "c".into(),
             data_type: dt.into(),
@@ -331,7 +363,10 @@ mod tests {
     /// 实测 information_schema 的写法 → 适配器认得的写法
     #[test]
     fn test_canonical_spellings() {
-        assert_eq!(canonical_type(&c("numeric", None, Some(38), Some(10), None)), "numeric(38,10)");
+        assert_eq!(
+            canonical_type(&c("numeric", None, Some(38), Some(10), None)),
+            "numeric(38,10)"
+        );
         assert_eq!(
             canonical_type(&c("timestamp without time zone", None, None, None, Some(6))),
             "timestamp(6)"
@@ -348,8 +383,14 @@ mod tests {
             canonical_type(&c("character varying", Some(200), None, None, None)),
             "character varying(200)"
         );
-        assert_eq!(canonical_type(&c("character", Some(10), None, None, None)), "character(10)");
-        assert_eq!(canonical_type(&c("bigint", None, Some(64), Some(0), None)), "bigint");
+        assert_eq!(
+            canonical_type(&c("character", Some(10), None, None, None)),
+            "character(10)"
+        );
+        assert_eq!(
+            canonical_type(&c("bigint", None, Some(64), Some(0), None)),
+            "bigint"
+        );
         assert_eq!(canonical_type(&c("ARRAY", None, None, None, None)), "ARRAY");
     }
 

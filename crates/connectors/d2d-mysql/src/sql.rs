@@ -76,7 +76,7 @@ pub fn render_partition_predicate(p: &PartitionPredicate) -> String {
             preds.join(" AND ")
         }
         // MySQL 有 `CRC32()`。`COALESCE` 不能省：NULL 参与 `MOD(...) = i` 求值为 NULL，
-    // 四个桶都不收 —— 可空列上的 NULL 行会被静默漏掉（Doris 那边实测过）。
+        // 四个桶都不收 —— 可空列上的 NULL 行会被静默漏掉（Doris 那边实测过）。
         PartitionPredicate::Hash {
             column,
             modulo,
@@ -110,9 +110,11 @@ impl<'a> MysqlSqlBuilder<'a> {
 
     fn select_list(&self, query: &QueryConfig) -> String {
         match &query.columns {
-            Some(cols) if !cols.is_empty() => {
-                cols.iter().map(column_sql).collect::<Vec<_>>().join(",\n  ")
-            }
+            Some(cols) if !cols.is_empty() => cols
+                .iter()
+                .map(column_sql)
+                .collect::<Vec<_>>()
+                .join(",\n  "),
             _ => "*".to_string(),
         }
     }
@@ -166,9 +168,9 @@ impl<'a> MysqlSqlBuilder<'a> {
         let Some(columns) = &query.columns else {
             return Ok(query.clone());
         };
-        let has = columns.iter().any(|c| {
-            c.output_name() == column || matches!(c, QueryColumn::Name(n) if n == column)
-        });
+        let has = columns
+            .iter()
+            .any(|c| c.output_name() == column || matches!(c, QueryColumn::Name(n) if n == column));
         if has {
             return Ok(query.clone());
         }
@@ -200,7 +202,10 @@ mod tests {
     #[test]
     fn test_column_sql_never_emits_double_quotes() {
         assert_eq!(column_sql(&QueryColumn::Name("id".into())), "`id`");
-        let e = QueryColumn::Expr { expr: "`amt` * 1.1".into(), alias: "scaled".into() };
+        let e = QueryColumn::Expr {
+            expr: "`amt` * 1.1".into(),
+            alias: "scaled".into(),
+        };
         assert_eq!(column_sql(&e), "`amt` * 1.1 AS `scaled`");
     }
 
@@ -240,7 +245,10 @@ mod tests {
             modulo: 4,
             remainder: 3,
         });
-        assert_eq!(sql, "MOD(CRC32(COALESCE(CAST(`user_id` AS CHAR), '')), 4) = 3");
+        assert_eq!(
+            sql,
+            "MOD(CRC32(COALESCE(CAST(`user_id` AS CHAR), '')), 4) = 3"
+        );
         assert!(sql.contains("COALESCE"), "可空列会丢 NULL 行：{}", sql);
         // Doris 的 CAST AS STRING 在 MySQL 里不成立
         assert!(!sql.contains("AS STRING"), "{}", sql);
@@ -274,6 +282,10 @@ mod tests {
         };
         let fixed = b().ensure_partition_column(&q, "id").unwrap();
         assert_eq!(fixed.columns.unwrap().len(), 2);
-        assert!(b().ensure_partition_column(&QueryConfig::default(), "id").unwrap().columns.is_none());
+        assert!(b()
+            .ensure_partition_column(&QueryConfig::default(), "id")
+            .unwrap()
+            .columns
+            .is_none());
     }
 }

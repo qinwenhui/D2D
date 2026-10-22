@@ -28,7 +28,10 @@ pub enum LogicalType {
     Float32,
     Float64,
     /// 十进制定点数。precision 1..=38，scale 0..=precision
-    Decimal { precision: u8, scale: i8 },
+    Decimal {
+        precision: u8,
+        scale: i8,
+    },
     /// 字符串（UTF-8）
     Utf8,
     /// 大字符串（>2GB 场景）
@@ -229,7 +232,10 @@ impl LogicalType {
     pub fn is_lob(&self) -> bool {
         matches!(
             self,
-            LogicalType::Binary | LogicalType::LargeBinary | LogicalType::Utf8 | LogicalType::LargeUtf8
+            LogicalType::Binary
+                | LogicalType::LargeBinary
+                | LogicalType::Utf8
+                | LogicalType::LargeUtf8
         )
     }
 
@@ -329,7 +335,9 @@ impl LogicalType {
             LogicalType::UInt64 => "BIGINT UNSIGNED".to_string(),
             LogicalType::Float32 => "FLOAT".to_string(),
             LogicalType::Float64 => "DOUBLE".to_string(),
-            LogicalType::Decimal { precision, scale } => format!("DECIMAL({},{})", precision, scale),
+            LogicalType::Decimal { precision, scale } => {
+                format!("DECIMAL({},{})", precision, scale)
+            }
             LogicalType::Utf8 => "VARCHAR".to_string(),
             LogicalType::LargeUtf8 => "TEXT".to_string(),
             LogicalType::Binary => "BINARY".to_string(),
@@ -369,9 +377,24 @@ mod tests {
 
     #[test]
     fn test_decimal_validation() {
-        assert!(LogicalType::Decimal { precision: 38, scale: 10 }.validate().is_ok());
-        assert!(LogicalType::Decimal { precision: 0, scale: 0 }.validate().is_err());
-        assert!(LogicalType::Decimal { precision: 10, scale: 11 }.validate().is_err());
+        assert!(LogicalType::Decimal {
+            precision: 38,
+            scale: 10
+        }
+        .validate()
+        .is_ok());
+        assert!(LogicalType::Decimal {
+            precision: 0,
+            scale: 0
+        }
+        .validate()
+        .is_err());
+        assert!(LogicalType::Decimal {
+            precision: 10,
+            scale: 11
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
@@ -391,14 +414,31 @@ mod tests {
 
     #[test]
     fn test_describe() {
-        assert_eq!(LogicalType::Timestamp { precision: TemporalPrecision::Micro, tz: None }.describe(), "TIMESTAMP(micro)");
+        assert_eq!(
+            LogicalType::Timestamp {
+                precision: TemporalPrecision::Micro,
+                tz: None
+            }
+            .describe(),
+            "TIMESTAMP(micro)"
+        );
         assert_eq!(FixedOffset::cst().to_string(), "+08:00");
-        assert_eq!(LogicalType::Decimal{precision:19,scale:4}.describe(), "DECIMAL(19,4)");
+        assert_eq!(
+            LogicalType::Decimal {
+                precision: 19,
+                scale: 4
+            }
+            .describe(),
+            "DECIMAL(19,4)"
+        );
     }
 
     #[test]
     fn test_nested_validation() {
-        let bad = LogicalType::List(Box::new(LogicalType::Decimal { precision: 99, scale: 0 }));
+        let bad = LogicalType::List(Box::new(LogicalType::Decimal {
+            precision: 99,
+            scale: 0,
+        }));
         assert!(bad.validate_deep().is_err());
     }
 
@@ -406,7 +446,14 @@ mod tests {
     fn test_schema_lookup() {
         let schema = LogicalSchema::new(vec![
             LogicalField::new("id", LogicalType::Int64, false),
-            LogicalField::new("amount", LogicalType::Decimal { precision: 19, scale: 4 }, true),
+            LogicalField::new(
+                "amount",
+                LogicalType::Decimal {
+                    precision: 19,
+                    scale: 4,
+                },
+                true,
+            ),
         ]);
         assert_eq!(schema.field_index("amount"), Some(1));
         assert!(schema.field("nope").is_none());
@@ -419,7 +466,10 @@ mod tests {
     fn test_origin_provenance() {
         let f = LogicalField::with_origin(
             "amt",
-            LogicalType::Decimal { precision: 38, scale: 10 },
+            LogicalType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
             true,
             TypeOrigin::new("dameng", "NUMBER(38,10)"),
         );

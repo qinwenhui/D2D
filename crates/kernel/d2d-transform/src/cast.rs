@@ -31,7 +31,9 @@ impl Cast {
                 .fields()
                 .iter()
                 .position(|f| f.name() == name)
-                .ok_or_else(|| d2d_core::D2DError::schema(format!("cast column '{}' not found", name)))?;
+                .ok_or_else(|| {
+                    d2d_core::D2DError::schema(format!("cast column '{}' not found", name))
+                })?;
             resolved.push((idx, target_type.clone()));
         }
         self.resolved = resolved;
@@ -42,10 +44,8 @@ impl Cast {
 impl Transform for Cast {
     fn transform(&self, input: RecordBatch) -> D2DResult<RecordBatch> {
         let schema = input.schema();
-        let mut new_columns: Vec<Arc<dyn arrow::array::Array>> =
-            input.columns().to_vec();
-        let mut new_fields: Vec<Field> =
-            schema.fields().iter().map(|f| (**f).clone()).collect();
+        let mut new_columns: Vec<Arc<dyn arrow::array::Array>> = input.columns().to_vec();
+        let mut new_fields: Vec<Field> = schema.fields().iter().map(|f| (**f).clone()).collect();
 
         for &(idx, ref target_type) in &self.resolved {
             let array = input.column(idx);
@@ -73,7 +73,8 @@ impl Transform for Cast {
             );
         }
 
-        let new_schema = SchemaRef::new(Schema::new(new_fields).with_metadata(schema.metadata().clone()));
+        let new_schema =
+            SchemaRef::new(Schema::new(new_fields).with_metadata(schema.metadata().clone()));
         Ok(RecordBatch::try_new(new_schema, new_columns)?)
     }
 

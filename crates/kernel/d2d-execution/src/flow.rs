@@ -130,8 +130,8 @@ use d2d_core::{D2DError, D2DResult, RecordBatchExt};
 use d2d_memory::{MemSnapshot, SlotPool};
 
 use crate::audit::{RowAudit, Verdict};
-use crate::pool::{DataPool, PoolConfig, PoolOverflow, PoolStats, SpillItem};
 use crate::plan::ExecutionPath;
+use crate::pool::{DataPool, PoolConfig, PoolOverflow, PoolStats, SpillItem};
 
 // ═══════════════════════════ 配置面 ═══════════════════════════
 
@@ -280,7 +280,6 @@ pub struct PipelineStage {
     #[serde(default)]
     pub batch_rows: usize,
 }
-
 
 /// 不攒批时，**一个处理单元大概占多少字节** —— 只用于内存账的估算
 ///
@@ -494,7 +493,11 @@ impl FlowSpec {
             lines.push(MemoryLine {
                 what: "源端取数单元",
                 bytes: 0,
-                note: format!("{} 个{}（进程内，不额外占用）", r.source, unit.kind.describe()),
+                note: format!(
+                    "{} 个{}（进程内，不额外占用）",
+                    r.source,
+                    unit.kind.describe()
+                ),
             });
         }
 
@@ -502,10 +505,7 @@ impl FlowSpec {
         lines.push(MemoryLine {
             what: "source_pool",
             bytes: self.source.pool.capacity,
-            note: format!(
-                "池满处置：{}",
-                self.source.pool.on_overflow.describe()
-            ),
+            note: format!("池满处置：{}", self.source.pool.on_overflow.describe()),
         });
 
         // ③ pipeline 工作集：并发 × 单批。**这就是 pipeline 的内存参数**
@@ -522,7 +522,11 @@ impl FlowSpec {
             what: "pipeline 工作集",
             bytes: r.pipeline * per_batch,
             note: if self.pipeline.batch_bytes > 0 {
-                format!("{} 个 task × {} MB（攒批上限）", r.pipeline, per_batch / 1048576)
+                format!(
+                    "{} 个 task × {} MB（攒批上限）",
+                    r.pipeline,
+                    per_batch / 1048576
+                )
             } else {
                 format!(
                     "{} 个 task × {} MB（按源端单批估算，配 batch_bytes 可精确控制）",
@@ -578,7 +582,10 @@ impl FlowSpec {
     /// 细节（为什么不能推迟、为什么只清"确定已死"的）见
     /// [`PoolConfig::validate_spill_dir`]。
     pub fn validate_spill_dirs(&self) -> D2DResult<()> {
-        self.source.pool.to_pool_config("source").validate_spill_dir()?;
+        self.source
+            .pool
+            .to_pool_config("source")
+            .validate_spill_dir()?;
         self.sink.pool.to_pool_config("sink").validate_spill_dir()?;
         Ok(())
     }
@@ -1163,7 +1170,9 @@ pub async fn run_flow(run: FlowRun<'_>) -> D2DResult<FlowReport> {
                         break;
                     }
                 };
-                let Some(first) = in_pool.pop().await else { break };
+                let Some(first) = in_pool.pop().await else {
+                    break;
+                };
                 let first = match first {
                     Ok(x) => x,
                     Err(e) => {
@@ -1245,7 +1254,9 @@ pub async fn run_flow(run: FlowRun<'_>) -> D2DResult<FlowReport> {
                         break;
                     }
                 };
-                let Some(first) = in_pool.pop().await else { break };
+                let Some(first) = in_pool.pop().await else {
+                    break;
+                };
                 let first = match first {
                     Ok(x) => x,
                     Err(e) => {
@@ -1298,11 +1309,17 @@ pub async fn run_flow(run: FlowRun<'_>) -> D2DResult<FlowReport> {
         let ctl = Arc::clone(&ctl);
         tokio::spawn(async move {
             let src = drain_dispatched(&ctl, source_dispatch).await;
-            debug!(tasks = src.len(), "全部 source_task 已退出，关闭 source_pool");
+            debug!(
+                tasks = src.len(),
+                "全部 source_task 已退出，关闭 source_pool"
+            );
             source_pool.close();
 
             let pipe = drain_dispatched(&ctl, pipeline_dispatch).await;
-            debug!(tasks = pipe.len(), "全部 pipeline_task 已退出，关闭 sink_pool");
+            debug!(
+                tasks = pipe.len(),
+                "全部 pipeline_task 已退出，关闭 sink_pool"
+            );
             sink_pool.close();
         })
     };
@@ -1607,10 +1624,7 @@ fn merge_items(items: Vec<FlowItem>) -> D2DResult<FlowItem> {
 }
 
 /// 跑算子链
-fn apply_chain(
-    chain: &d2d_transform::TransformChain,
-    item: FlowItem,
-) -> D2DResult<FlowItem> {
+fn apply_chain(chain: &d2d_transform::TransformChain, item: FlowItem) -> D2DResult<FlowItem> {
     match item {
         FlowItem::Batch(b) => Ok(FlowItem::Batch(chain.transform(b)?)),
         // 直通面不该走到这里（规划器保证了"有算子必走逻辑面"）
@@ -1759,7 +1773,10 @@ mod tests {
         assert_eq!(parse_bytesize("1K").unwrap(), 1024);
         assert_eq!(parse_bytesize("64MB").unwrap(), 64 * MB);
         assert_eq!(parse_bytesize("2GB").unwrap(), 2 * 1024 * MB);
-        assert_eq!(parse_bytesize(" 1.5GB ").unwrap(), (1.5 * 1024.0 * MB as f64) as usize);
+        assert_eq!(
+            parse_bytesize(" 1.5GB ").unwrap(),
+            (1.5 * 1024.0 * MB as f64) as usize
+        );
         // 下划线分隔是给人看的，不是给解析器掺沙子的
         assert_eq!(parse_bytesize("1_048_576").unwrap(), 1048576);
     }
@@ -1770,7 +1787,11 @@ mod tests {
         assert!(parse_bytesize("abc").is_err());
         let e = parse_bytesize("5XB").unwrap_err();
         assert!(e.contains("不识别的单位"), "{}", e);
-        assert!(e.contains("1024"), "错误信息要说明进制，否则用户按 1000 算就永远对不上: {}", e);
+        assert!(
+            e.contains("1024"),
+            "错误信息要说明进制，否则用户按 1000 算就永远对不上: {}",
+            e
+        );
     }
 
     #[test]
@@ -1807,9 +1828,11 @@ sink:
     /// 参数名拼错必须**在解析配置时**失败 —— 与算子名拼错同一条纪律
     #[test]
     fn test_misspelled_flow_field_is_rejected() {
-        let e = serde_yaml::from_str::<FlowSpec>("source:\n  concurrency: 4\n  poool:\n    capacity: 1GB\n")
-            .unwrap_err()
-            .to_string();
+        let e = serde_yaml::from_str::<FlowSpec>(
+            "source:\n  concurrency: 4\n  poool:\n    capacity: 1GB\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("poool"), "{}", e);
     }
 
@@ -1840,7 +1863,11 @@ sink:
             .to_string();
         assert!(e.contains("内存账超出"), "{}", e);
         let r2 = s.resolve();
-        assert_eq!((r2.source, r2.pipeline, r2.sink), (64, 32, 8), "报错不等于改写");
+        assert_eq!(
+            (r2.source, r2.pipeline, r2.sink),
+            (64, 32, 8),
+            "报错不等于改写"
+        );
     }
 
     /// 内存账六项必须**逐项可见**，且明细之和等于总数
@@ -1869,7 +1896,14 @@ sink:
         assert_eq!(a.child_process_bytes, 16 * 64 * MB);
         assert_eq!(a.in_process_mb(), a.total / MB - 1024);
         let rendered = a.render();
-        for what in ["源端取数单元", "source_pool", "pipeline 工作集", "转换中间态", "sink_pool", "sink 工作集"] {
+        for what in [
+            "源端取数单元",
+            "source_pool",
+            "pipeline 工作集",
+            "转换中间态",
+            "sink_pool",
+            "sink 工作集",
+        ] {
             assert!(rendered.contains(what), "明细里缺 {}: {}", what, rendered);
         }
     }
@@ -1957,9 +1991,7 @@ sink: {concurrency: 8, batch_bytes: 100MB, pool: {capacity: 2GB}}
         use arrow::datatypes::{DataType, Field, Schema};
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
         let arr = Int32Array::from(vec![1i32; rows]);
-        FlowItem::Batch(
-            arrow::array::RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap(),
-        )
+        FlowItem::Batch(arrow::array::RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap())
     }
 
     #[test]
@@ -2129,7 +2161,10 @@ sink: {concurrency: 8, batch_bytes: 100MB, pool: {capacity: 2GB}}
         .unwrap();
 
         let a = p.pop().await.unwrap().unwrap();
-        assert!(matches!(a, FlowItem::Batch(_)), "先进先出：第一个应当是批次");
+        assert!(
+            matches!(a, FlowItem::Batch(_)),
+            "先进先出：第一个应当是批次"
+        );
         assert_eq!(a.rows(), 5);
 
         let b = p.pop().await.unwrap().unwrap();

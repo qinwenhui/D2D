@@ -43,7 +43,9 @@ pub struct SourceFactory {
 
 impl std::fmt::Debug for SourceFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SourceFactory").field("name", &self.name).finish()
+        f.debug_struct("SourceFactory")
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -86,7 +88,9 @@ pub struct SinkFactory {
 
 impl std::fmt::Debug for SinkFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SinkFactory").field("name", &self.name).finish()
+        f.debug_struct("SinkFactory")
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -126,7 +130,9 @@ pub struct TypeAdapterFactory {
 
 impl std::fmt::Debug for TypeAdapterFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TypeAdapterFactory").field("db", &self.db).finish()
+        f.debug_struct("TypeAdapterFactory")
+            .field("db", &self.db)
+            .finish()
     }
 }
 
@@ -209,9 +215,21 @@ impl ConnectorRegistry {
     pub fn describe(&self) -> String {
         format!(
             "source=[{}] sink=[{}] 类型适配器=[{}]",
-            self.read_source_factories().keys().cloned().collect::<Vec<_>>().join(", "),
-            self.read_sink_factories().keys().cloned().collect::<Vec<_>>().join(", "),
-            self.read_type_adapters().keys().cloned().collect::<Vec<_>>().join(", "),
+            self.read_source_factories()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.read_sink_factories()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.read_type_adapters()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
         )
     }
 }

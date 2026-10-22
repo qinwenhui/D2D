@@ -213,7 +213,8 @@ mod tests {
         assert_eq!(specs[0].op_name(), "project");
         assert_eq!(specs[3].op_name(), "const_column");
         for s in &specs {
-            s.build().unwrap_or_else(|e| panic!("{}: {}", s.op_name(), e));
+            s.build()
+                .unwrap_or_else(|e| panic!("{}: {}", s.op_name(), e));
         }
     }
 
@@ -288,10 +289,22 @@ mod tests {
 
     #[test]
     fn test_const_value_types() {
-        assert_eq!(const_value_of(&serde_json::json!(null)).unwrap(), ConstValue::Null);
-        assert_eq!(const_value_of(&serde_json::json!(true)).unwrap(), ConstValue::Bool(true));
-        assert_eq!(const_value_of(&serde_json::json!(7)).unwrap(), ConstValue::Int64(7));
-        assert_eq!(const_value_of(&serde_json::json!(1.5)).unwrap(), ConstValue::Float64(1.5));
+        assert_eq!(
+            const_value_of(&serde_json::json!(null)).unwrap(),
+            ConstValue::Null
+        );
+        assert_eq!(
+            const_value_of(&serde_json::json!(true)).unwrap(),
+            ConstValue::Bool(true)
+        );
+        assert_eq!(
+            const_value_of(&serde_json::json!(7)).unwrap(),
+            ConstValue::Int64(7)
+        );
+        assert_eq!(
+            const_value_of(&serde_json::json!(1.5)).unwrap(),
+            ConstValue::Float64(1.5)
+        );
         assert_eq!(
             const_value_of(&serde_json::json!("x")).unwrap(),
             ConstValue::Utf8("x".into())

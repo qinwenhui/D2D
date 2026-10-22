@@ -85,9 +85,7 @@ impl MysqlSourceConnector {
             })
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
-                D2DError::config(
-                    "mysql source 需要 `source.schema_name`（库名，用于限定表名）",
-                )
+                D2DError::config("mysql source 需要 `source.schema_name`（库名，用于限定表名）")
             })
     }
 
@@ -105,8 +103,7 @@ impl MysqlSourceConnector {
         let Some(p) = spec.effective_partition()? else {
             return Ok(vec![Self::single_split(&spec.table)]);
         };
-        let probed = if p.mode == PartitionMode::Range && (p.lower.is_none() || p.upper.is_none())
-        {
+        let probed = if p.mode == PartitionMode::Range && (p.lower.is_none() || p.upper.is_none()) {
             let col = p.column.clone().unwrap_or_default();
             let (lo, hi) = self.probe_min_max(spec, &col).await?;
             let cuts = d2d_connector::partition::range_cuts(&lo, &hi, p.count)?;
@@ -115,12 +112,8 @@ impl MysqlSourceConnector {
         } else {
             None
         };
-        let plan = d2d_connector::partition::plan(
-            &p,
-            &spec.table,
-            spec.schema_name.as_deref(),
-            probed,
-        )?;
+        let plan =
+            d2d_connector::partition::plan(&p, &spec.table, spec.schema_name.as_deref(), probed)?;
         Ok(plan
             .partitions
             .iter()
@@ -150,7 +143,10 @@ impl MysqlSourceConnector {
         &self,
         spec: &SourceSpec,
         column: &str,
-    ) -> D2DResult<(d2d_connector::partition::Literal, d2d_connector::partition::Literal)> {
+    ) -> D2DResult<(
+        d2d_connector::partition::Literal,
+        d2d_connector::partition::Literal,
+    )> {
         use d2d_connector::partition::Literal;
         if column.trim().is_empty() {
             return Err(D2DError::config(
@@ -293,8 +289,8 @@ impl SourceConnector for MysqlSourceConnector {
             CHANNEL_DEPTH,
         );
         tokio::spawn(async move {
-            let res = stream_split(pool, sql, schema, logical, &tx, &rows_read, &started, meter)
-                .await;
+            let res =
+                stream_split(pool, sql, schema, logical, &tx, &rows_read, &started, meter).await;
             if let Err(e) = res {
                 let _ = tx.send(Err(e)).await;
             }
@@ -471,7 +467,10 @@ mod tests {
     #[tokio::test]
     async fn test_read_before_init_errors() {
         let c = MysqlSourceConnector::new();
-        let s = SourceSplit { split_id: "x".into(), split_info: json!({"where_condition": ""}) };
+        let s = SourceSplit {
+            split_id: "x".into(),
+            split_info: json!({"where_condition": ""}),
+        };
         assert!(c.read(&s).await.is_err());
         assert!(c.schema().await.is_err());
     }

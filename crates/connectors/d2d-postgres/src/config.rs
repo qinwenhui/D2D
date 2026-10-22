@@ -53,7 +53,13 @@ impl PgConnection {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from);
-        Ok(Self { host, port, user, password, database })
+        Ok(Self {
+            host,
+            port,
+            user,
+            password,
+            database,
+        })
     }
 
     pub fn config(&self, database: &str) -> Config {

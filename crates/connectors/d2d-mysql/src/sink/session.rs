@@ -84,12 +84,12 @@ impl SinkSession for MysqlSinkSession {
                 n += 1;
             }
 
-            let one_row = format!(
-                "({})",
-                vec!["?"; ncols].join(",")
-            );
+            let one_row = format!("({})", vec!["?"; ncols].join(","));
             let values = vec![one_row.as_str(); n].join(",");
-            let sql = format!("INSERT INTO {} ({}) VALUES {}", self.qualified_table, col_list, values);
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES {}",
+                self.qualified_table, col_list, values
+            );
 
             // 如实申报这段绑定值（求值期间它们都在本进程里）
             let _lease = self.meter.as_ref().map(|m| m.claim(bytes));
@@ -134,19 +134,35 @@ fn value_of(
     }
     Ok(match dt {
         DataType::Boolean => {
-            let v = arr.as_any().downcast_ref::<BooleanArray>().unwrap().value(row);
+            let v = arr
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(row);
             Value::Bytes(if v { b"1".to_vec() } else { b"0".to_vec() })
         }
         DataType::Binary => {
-            let v = arr.as_any().downcast_ref::<BinaryArray>().unwrap().value(row);
+            let v = arr
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .value(row);
             Value::Bytes(v.to_vec())
         }
         DataType::LargeBinary => {
-            let v = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap().value(row);
+            let v = arr
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value(row);
             Value::Bytes(v.to_vec())
         }
         DataType::Date32 => {
-            let days = arr.as_any().downcast_ref::<Date32Array>().unwrap().value(row);
+            let days = arr
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap()
+                .value(row);
             let d = chrono::DateTime::from_timestamp(days as i64 * 86400, 0)
                 .ok_or_else(|| D2DError::schema(format!("列 `{}` 的日期 {} 超出范围", col, days)))?
                 .naive_utc()
@@ -212,9 +228,18 @@ fn fmt_time(v: i64, unit: arrow::datatypes::TimeUnit, col: &str) -> D2DResult<St
     use arrow::datatypes::TimeUnit;
     let (secs, nanos) = match unit {
         TimeUnit::Second => (v, 0),
-        TimeUnit::Millisecond => (v.div_euclid(1_000), (v.rem_euclid(1_000) * 1_000_000) as u32),
-        TimeUnit::Microsecond => (v.div_euclid(1_000_000), (v.rem_euclid(1_000_000) * 1_000) as u32),
-        TimeUnit::Nanosecond => (v.div_euclid(1_000_000_000), v.rem_euclid(1_000_000_000) as u32),
+        TimeUnit::Millisecond => (
+            v.div_euclid(1_000),
+            (v.rem_euclid(1_000) * 1_000_000) as u32,
+        ),
+        TimeUnit::Microsecond => (
+            v.div_euclid(1_000_000),
+            (v.rem_euclid(1_000_000) * 1_000) as u32,
+        ),
+        TimeUnit::Nanosecond => (
+            v.div_euclid(1_000_000_000),
+            v.rem_euclid(1_000_000_000) as u32,
+        ),
     };
     let t = chrono::NaiveTime::from_num_seconds_from_midnight_opt(secs as u32, nanos)
         .ok_or_else(|| D2DError::schema(format!("列 `{}` 的时间值 {} 超出范围", col, v)))?;
@@ -230,9 +255,18 @@ fn fmt_timestamp(v: i64, unit: arrow::datatypes::TimeUnit, col: &str) -> D2DResu
     use arrow::datatypes::TimeUnit;
     let (secs, nanos) = match unit {
         TimeUnit::Second => (v, 0),
-        TimeUnit::Millisecond => (v.div_euclid(1_000), (v.rem_euclid(1_000) * 1_000_000) as u32),
-        TimeUnit::Microsecond => (v.div_euclid(1_000_000), (v.rem_euclid(1_000_000) * 1_000) as u32),
-        TimeUnit::Nanosecond => (v.div_euclid(1_000_000_000), v.rem_euclid(1_000_000_000) as u32),
+        TimeUnit::Millisecond => (
+            v.div_euclid(1_000),
+            (v.rem_euclid(1_000) * 1_000_000) as u32,
+        ),
+        TimeUnit::Microsecond => (
+            v.div_euclid(1_000_000),
+            (v.rem_euclid(1_000_000) * 1_000) as u32,
+        ),
+        TimeUnit::Nanosecond => (
+            v.div_euclid(1_000_000_000),
+            v.rem_euclid(1_000_000_000) as u32,
+        ),
     };
     let dt = chrono::DateTime::from_timestamp(secs, nanos)
         .ok_or_else(|| D2DError::schema(format!("列 `{}` 的时间戳 {} 超出范围", col, v)))?
@@ -248,7 +282,9 @@ fn fmt_timestamp(v: i64, unit: arrow::datatypes::TimeUnit, col: &str) -> D2DResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{BooleanArray, Date32Array, Int64Array, StringArray, TimestampMicrosecondArray};
+    use arrow::array::{
+        BooleanArray, Date32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    };
     use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
@@ -273,7 +309,10 @@ mod tests {
             value_of(&a, 0, "s", &DataType::Utf8).unwrap(),
             Value::Bytes(_)
         ));
-        assert!(matches!(value_of(&a, 1, "s", &DataType::Utf8).unwrap(), Value::NULL));
+        assert!(matches!(
+            value_of(&a, 1, "s", &DataType::Utf8).unwrap(),
+            Value::NULL
+        ));
     }
 
     #[test]
@@ -285,7 +324,13 @@ mod tests {
             .and_utc()
             .timestamp_micros();
         let a = TimestampMicrosecondArray::from(vec![ts]).with_timezone_opt(None::<&str>);
-        let got = match value_of(&a, 0, "t", &DataType::Timestamp(TimeUnit::Microsecond, None)).unwrap()
+        let got = match value_of(
+            &a,
+            0,
+            "t",
+            &DataType::Timestamp(TimeUnit::Microsecond, None),
+        )
+        .unwrap()
         {
             Value::Bytes(b) => String::from_utf8(b).unwrap(),
             other => panic!("{:?}", other),

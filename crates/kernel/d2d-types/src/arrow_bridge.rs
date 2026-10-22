@@ -36,17 +36,21 @@ impl LogicalArrowBridge {
             LogicalType::Timestamp { precision, tz } => {
                 DataType::Timestamp(Self::time_unit(precision), tz.map(Self::tz_to_arrow))
             }
-            LogicalType::Interval => DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano),
-            LogicalType::Duration => {
-                DataType::Duration(arrow::datatypes::TimeUnit::Nanosecond)
+            LogicalType::Interval => {
+                DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano)
             }
+            LogicalType::Duration => DataType::Duration(arrow::datatypes::TimeUnit::Nanosecond),
             LogicalType::List(inner) => {
                 DataType::List(Arc::new(Field::new("item", Self::to_arrow(inner)?, true)))
             }
             LogicalType::Struct(fields) => {
                 let mut arrow_fields = Vec::with_capacity(fields.len());
                 for f in fields {
-                    arrow_fields.push(Field::new(&f.name, Self::to_arrow(&f.logical_type)?, f.nullable));
+                    arrow_fields.push(Field::new(
+                        &f.name,
+                        Self::to_arrow(&f.logical_type)?,
+                        f.nullable,
+                    ));
                 }
                 DataType::Struct(arrow_fields.into())
             }
@@ -66,10 +70,9 @@ impl LogicalArrowBridge {
                 DataType::Map(Arc::new(entries), false)
             }
             LogicalType::Json => DataType::Utf8, // JSON 序列化为字符串承载（显式决策，非 fallback）
-            LogicalType::Enum(_) => DataType::Dictionary(
-                Box::new(DataType::Int32),
-                Box::new(DataType::Utf8),
-            ),
+            LogicalType::Enum(_) => {
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+            }
         };
         Ok(dt)
     }
@@ -193,7 +196,11 @@ impl LogicalArrowBridge {
     pub fn schema_to_arrow(schema: &crate::LogicalSchema) -> D2DResult<Schema> {
         let mut fields = Vec::with_capacity(schema.fields.len());
         for f in &schema.fields {
-            fields.push(Field::new(&f.name, Self::to_arrow(&f.logical_type)?, f.nullable));
+            fields.push(Field::new(
+                &f.name,
+                Self::to_arrow(&f.logical_type)?,
+                f.nullable,
+            ));
         }
         Ok(Schema::new(fields).with_metadata(schema.metadata.clone()))
     }
@@ -266,7 +273,10 @@ mod tests {
         for ty in [
             LogicalType::Int64,
             LogicalType::Utf8,
-            LogicalType::Decimal { precision: 19, scale: 4 },
+            LogicalType::Decimal {
+                precision: 19,
+                scale: 4,
+            },
             LogicalType::Boolean,
         ] {
             let arrow = LogicalArrowBridge::to_arrow(&ty).unwrap();
@@ -282,7 +292,10 @@ mod tests {
             tz: Some(FixedOffset::cst()),
         };
         let arrow = LogicalArrowBridge::to_arrow(&ty).unwrap();
-        assert_eq!(arrow, DataType::Timestamp(TimeUnit::Microsecond, Some("+08:00".into())));
+        assert_eq!(
+            arrow,
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+08:00".into()))
+        );
         let back = LogicalArrowBridge::from_arrow(&arrow).unwrap();
         assert_eq!(ty, back);
     }
@@ -302,7 +315,11 @@ mod tests {
     fn test_float16_rejected_not_fallback() {
         let err = LogicalArrowBridge::from_arrow(&DataType::Float16).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Float16"), "应明确指出 Float16 不支持: {}", msg);
+        assert!(
+            msg.contains("Float16"),
+            "应明确指出 Float16 不支持: {}",
+            msg
+        );
         assert!(!msg.contains("Utf8"), "绝不能 fallback 成字符串");
     }
 

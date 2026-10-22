@@ -34,10 +34,7 @@ impl MysqlConnection {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| D2DError::config("mysql connection 需要 host（如 192.0.2.10）"))?
             .to_string();
-        let port = conn
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3306) as u16;
+        let port = conn.get("port").and_then(|v| v.as_u64()).unwrap_or(3306) as u16;
         let user = conn
             .get("user")
             .or_else(|| conn.get("username"))
@@ -54,7 +51,13 @@ impl MysqlConnection {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from);
-        Ok(Self { host, port, user, password, database })
+        Ok(Self {
+            host,
+            port,
+            user,
+            password,
+            database,
+        })
     }
 
     /// 建连选项
@@ -99,7 +102,10 @@ mod tests {
             "host": "192.0.2.10", "user": "root", "password": "p"
         }))
         .unwrap();
-        assert_eq!((c.port, c.user.as_str(), c.password.as_str()), (3306, "root", "p"));
+        assert_eq!(
+            (c.port, c.user.as_str(), c.password.as_str()),
+            (3306, "root", "p")
+        );
         assert_eq!(c.database, None);
 
         // username / database 也收
@@ -114,16 +120,21 @@ mod tests {
 
     #[test]
     fn test_host_is_required() {
-        let e = MysqlConnection::from_json(&json!({"port": 3306})).unwrap_err().to_string();
+        let e = MysqlConnection::from_json(&json!({"port": 3306}))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("host"), "{}", e);
-        let e = MysqlConnection::from_json(&json!({"host": "   "})).unwrap_err().to_string();
+        let e = MysqlConnection::from_json(&json!({"host": "   "}))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("host"), "{}", e);
     }
 
     /// 建连选项必须显式给那三项（与 Doris 同一条纪律：别让驱动去问服务端）
     #[test]
     fn test_opts_are_explicit() {
-        let c = MysqlConnection::from_json(&json!({"host": "h", "user": "u", "password": "p"})).unwrap();
+        let c = MysqlConnection::from_json(&json!({"host": "h", "user": "u", "password": "p"}))
+            .unwrap();
         let o = c.opts(Some("db"));
         assert!(!o.prefer_socket());
         assert!(o.max_allowed_packet().is_some());

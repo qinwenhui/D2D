@@ -528,7 +528,7 @@ fn int_cuts(lo: i128, hi: i128, count: usize, lo_lit: &Literal, hi_lit: &Literal
         return vec![lo_lit.clone(), hi_lit.clone()];
     }
     let span = hi - lo; // > 0
-    // 闭区间下最多 span 段（span+1 个值，切点必须严格递增）
+                        // 闭区间下最多 span 段（span+1 个值，切点必须严格递增）
     let count = count.min(span as usize).max(1);
 
     let mut cuts = Vec::with_capacity(count + 1);
@@ -563,7 +563,10 @@ fn float_cuts(lo: f64, hi: f64, count: usize, lo_lit: &Literal, hi_lit: &Literal
 
 /// 按时间跨度均分，切点吸附到自然边界
 fn time_cuts(lower: &Literal, upper: &Literal, count: usize) -> Vec<Literal> {
-    let (lo, hi) = (lower.as_millis().unwrap_or(0), upper.as_millis().unwrap_or(0));
+    let (lo, hi) = (
+        lower.as_millis().unwrap_or(0),
+        upper.as_millis().unwrap_or(0),
+    );
     if hi <= lo {
         return vec![lower.clone(), upper.clone()];
     }
@@ -583,7 +586,11 @@ fn time_cuts(lower: &Literal, upper: &Literal, count: usize) -> Vec<Literal> {
         let snapped = raw.div_euclid(g) * g;
         let prev = *ms.last().unwrap();
         // 吸附后必须仍严格大于前一个切点、且小于上界，否则退回未吸附值
-        let c = if snapped > prev && snapped < hi { snapped } else { raw };
+        let c = if snapped > prev && snapped < hi {
+            snapped
+        } else {
+            raw
+        };
         if c > prev && c < hi {
             ms.push(c);
         }
@@ -668,7 +675,9 @@ fn cut_point_partitions(column: &str, cuts: &[Literal]) -> Vec<Partition> {
             id: pid(out.len()),
             describe: format!(
                 "[{}, {})",
-                prev.as_ref().map(|x| x.to_string()).unwrap_or_else(|| "-∞".into()),
+                prev.as_ref()
+                    .map(|x| x.to_string())
+                    .unwrap_or_else(|| "-∞".into()),
                 c
             ),
             predicate: PartitionPredicate::Range {
@@ -684,7 +693,9 @@ fn cut_point_partitions(column: &str, cuts: &[Literal]) -> Vec<Partition> {
         id: pid(out.len()),
         describe: format!(
             "[{}, +∞)",
-            prev.as_ref().map(|x| x.to_string()).unwrap_or_else(|| "-∞".into())
+            prev.as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| "-∞".into())
         ),
         predicate: PartitionPredicate::Range {
             column: column.to_string(),
@@ -797,10 +808,10 @@ pub fn plan(
                     }
                     None => {
                         return Err(D2DError::config(format!(
-                            "partition.mode=range 未给 lower/upper，且连接器未能提供列 {} 的边界 —— \
+                        "partition.mode=range 未给 lower/upper，且连接器未能提供列 {} 的边界 —— \
                              请显式给出上下界，或改用 partition.mode=list / hash",
-                            spec.column.as_deref().unwrap_or("?")
-                        )))
+                        spec.column.as_deref().unwrap_or("?")
+                    )))
                     }
                 },
                 _ => unreachable!("validate() 已保证 lower/upper 成对"),
@@ -867,8 +878,9 @@ pub fn load_plan(path: &Path, fingerprint: &str) -> D2DResult<Option<PartitionPl
 pub fn save_plan(path: &Path, p: &PartitionPlan) -> D2DResult<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| D2DError::config(format!("创建计划目录失败 {}: {}", dir.display(), e)))?;
+            std::fs::create_dir_all(dir).map_err(|e| {
+                D2DError::config(format!("创建计划目录失败 {}: {}", dir.display(), e))
+            })?;
         }
     }
     let text = serde_json::to_string_pretty(p)
@@ -890,7 +902,10 @@ mod tests {
 
     fn millis_all(cuts: &[Literal]) -> Vec<i64> {
         cuts.iter()
-            .map(|c| c.as_millis().unwrap_or_else(|| panic!("{:?} 不是时间类型", c)))
+            .map(|c| {
+                c.as_millis()
+                    .unwrap_or_else(|| panic!("{:?} 不是时间类型", c))
+            })
             .collect()
     }
 
@@ -1227,8 +1242,10 @@ mod tests {
         }
         // 相邻分区首尾相接
         for w in p.partitions.windows(2) {
-            let (PartitionPredicate::Range { upper: a, .. }, PartitionPredicate::Range { lower: b, .. }) =
-                (&w[0].predicate, &w[1].predicate)
+            let (
+                PartitionPredicate::Range { upper: a, .. },
+                PartitionPredicate::Range { lower: b, .. },
+            ) = (&w[0].predicate, &w[1].predicate)
             else {
                 panic!("类型错");
             };
@@ -1489,10 +1506,16 @@ mod tests {
         let mut p = plan(&spec, "T", None, None).unwrap();
         p.version = 999;
         save_plan(&pf, &p).unwrap();
-        assert!(load_plan(&pf, &fp).unwrap_err().to_string().contains("版本"));
+        assert!(load_plan(&pf, &fp)
+            .unwrap_err()
+            .to_string()
+            .contains("版本"));
 
         std::fs::write(&pf, "{ not json").unwrap();
-        assert!(load_plan(&pf, &fp).unwrap_err().to_string().contains("解析失败"));
+        assert!(load_plan(&pf, &fp)
+            .unwrap_err()
+            .to_string()
+            .contains("解析失败"));
 
         let mut p2 = plan(&spec, "T", None, None).unwrap();
         p2.partitions.clear();

@@ -29,10 +29,15 @@ impl Transform for ColumnMap {
                 .get(field.name())
                 .cloned()
                 .unwrap_or_else(|| field.name().to_string());
-            new_fields.push(Field::new(new_name, field.data_type().clone(), field.is_nullable()));
+            new_fields.push(Field::new(
+                new_name,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ));
         }
 
-        let new_schema = SchemaRef::new(Schema::new(new_fields).with_metadata(schema.metadata().clone()));
+        let new_schema =
+            SchemaRef::new(Schema::new(new_fields).with_metadata(schema.metadata().clone()));
         Ok(RecordBatch::try_new(new_schema, input.columns().to_vec())?)
     }
 

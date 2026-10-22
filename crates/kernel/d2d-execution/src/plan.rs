@@ -117,13 +117,13 @@ pub fn plan_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::SchemaRef;
     use async_trait::async_trait;
     use d2d_connector::{
         Charset, CsvDialect, PhysicalSession, PhysicalSink, PhysicalSource, PhysicalStream,
         SinkSession, SinkSpec, SourceSpec, SourceSplit,
     };
     use d2d_core::{D2DResult, RecordBatchStream};
-    use arrow::datatypes::SchemaRef;
 
     // ── 测试替身：能力可任意组合 ──
 
@@ -194,10 +194,7 @@ mod tests {
         fn accepts_physical(&self, _: &PhysicalFormat) -> PhysicalCompat {
             self.verdict.clone().unwrap()
         }
-        async fn begin_physical(
-            &self,
-            _: &PhysicalFormat,
-        ) -> D2DResult<Box<dyn PhysicalSession>> {
+        async fn begin_physical(&self, _: &PhysicalFormat) -> D2DResult<Box<dyn PhysicalSession>> {
             unimplemented!()
         }
     }
@@ -238,7 +235,10 @@ mod tests {
         use d2d_transform::Transform;
         struct Noop;
         impl Transform for Noop {
-            fn transform(&self, b: arrow::array::RecordBatch) -> D2DResult<arrow::array::RecordBatch> {
+            fn transform(
+                &self,
+                b: arrow::array::RecordBatch,
+            ) -> D2DResult<arrow::array::RecordBatch> {
                 Ok(b)
             }
             fn name(&self) -> &str {
