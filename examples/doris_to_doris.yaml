@@ -1,0 +1,123 @@
+# D2D Job 配置: Doris t_src → Doris t_dst（读走 FE 的 MySQL 协议口）
+# 用法: d2d --config examples/doris_to_doris.yaml [--dry-run]
+#
+# ⚠️ Doris 有**两个口**，别混：
+#   18030  FE 的 HTTP 口     —— 写（Stream Load）与 BE 自动发现
+#   19030  FE 的 MySQL 协议口 —— **读**（本示例用）
+# 端口默认值分别是 8030 / 9030，本集群改过，所以显式写出来。
+
+job:
+  name: "doris_to_doris"
+
+flow:
+  source:
+    concurrency: 8             # 同时几条 MySQL 连接压在 FE 上（**源库能接几个**）
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 8
+  sink:
+    concurrency: 4
+    # 一次递多少由**内核**攒（连接器内部不攒）。每次写入有一份与大小无关的固定
+    # 开销（开事务、提交、往返），所以调小会亏：实测同一份 1915 万行数据
+    # ~70MB 单元 86 s、~90–100MB 单元 74–78 s，拐点在 ~90MB（见 BENCH-ENV.md）。
+    batch_bytes: 100MB
+    batch_rows: 100000
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+
+source:
+  connector: "doris"
+  connection:
+    fe_hosts:
+      - "192.0.2.47"
+    query_port: 19030          # FE 的 MySQL 协议口
+    username: "${DORIS_USER}"
+    password: "${DORIS_PASS}"
+
+  # Doris 没有 schema 这一层，database 就是命名空间，
+  # 所以库名放在引擎给"这个源的命名空间"留的通用位置（与达梦放 schema 同一处）
+  schema_name: "app_js_produce"
+  table: "t_cal_day_meter_point_list_bal"
+
+  # ── 查询侧：显式下推（引擎只做 SQL 字符串组装）──
+  # ⚠️ 列名/表达式里的标识符请用**反引号**。Doris 走 MySQL 语义，双引号是
+  #    字符串字面量：`SELECT "id"` 返回的是常量 'id'，不是那一列。
+  query:
+    # columns 缺省 = SELECT *（本示例不裁剪，便于逐列对账）
+    where_clause: |
+      `pdate` >= '2022-01-01 00:00:00'
+    # limit: 1000000
+
+  # ── 分区：取数范围怎么切（**与并发度无关**）──
+  #   none  : 不分片
+  #   list  : 直接给 conditions 数组，每条一个分区 —— 零探测
+  #   range : 给 lower+upper 则零探测；不给则回退探 MIN/MAX（一次往返）
+  #   hash  : MOD(CRC32(...), n) = i —— 零探测
+  #
+  # ⚠️ hash 模式的列**可空也不丢行**：连接器渲染的是
+  #    `MOD(CRC32(COALESCE(CAST(col AS STRING), '')), n) = i`。
+  #    裸 `MOD(CRC32(...))` 会让 NULL 行哪个桶都不进（实测丢过行）。
+  partition:
+    mode: "range"
+    column: "pdate"
+    count: 8
+    lower: "2022-01-01 00:00:00"
+    upper: "2026-12-31 00:00:00"
+
+  # ── 类型契约（**Doris 源不强制**）──
+  # 表上的列，类型由 `DESCRIBE` 给出（Doris 原生写法，权威）。
+  # 但 `query.columns` 里的**表达式别名**不在表结构里，DESCRIBE 问不出来 ——
+  # 那时才需要在这里声明它的源类型，否则只有 MySQL 协议类型码可用（有损）。
+  # type_contract:
+  #   - column: "pdate"
+  #     source_type: "datetime"
+  #     sink_type: "DATETIME"
+  #   - column: "scaled"
+  #     source_type: "decimal(18,4)"
+  #     sink_type: "DECIMAL(18,4)"
+
+sink:
+  connector: "doris"
+  connection:
+    fe_hosts:
+      - "192.0.2.47"
+    be_hosts:                  # Stream Load 直连 BE（见 sink 侧文档：经 FE 转发会丢 Authorization）
+      - "192.0.2.47:18040"
+      - "192.0.2.48:18040"
+      - "192.0.2.49:18040"
+    http_port: 18030
+    be_http_port: 18040
+    username: "${DORIS_USER}"
+    password: "${DORIS_PASS}"
+  database: "app_js_produce"
+  table: "t_doris_to_doris"
+  properties:
+    stream_load:
+      # ── 格式：csv（缺省）或 json ──
+      #
+      # 同一批数据实测（1915 万行 / 37 列，见 BENCH-ENV.md）：
+      #   csv  110.4 s，载荷 423 B/行
+      #   json 150.4 s，载荷 1081 B/行  ← 每行都重复一遍键名
+      # 两条路**逐列指纹完全一致**。json 不省字节，省的是心：
+      # 它没有 CSV 那套转义/空值约定上的坑（NULL 是原生 null，不会与值撞车）。
+      format: "csv"
+      # ── 下面两项**只管 csv** ──
+      column_separator: "\t"
+      line_delimiter: "\n"
+      max_filter_ratio: 0.0
+      strict_mode: true
+      # ── 单请求体上限（字节）：目标端的物理约束，**不是攒批阈值** ──
+      # 内核的 flow.sink.batch_bytes 是"一次递多少"的上界；这一项是"一个 HTTP 请求
+      # 能带多少"，连接器在上界之内按它再切。缺省：csv 不切，json 补 Doris BE 的
+      # streaming_load_json_max_mb 出厂值 100 MB（比 csv 那条 10 GB 小得多，
+      # 不补的话同一份 batch_bytes 配 csv 能跑、配 json 会整批被拒）。
+      # max_request_bytes: 104857600
+  write:
+    max_retries: 3
+    retry_backoff_ms: 1000
+
+engine:
+  memory_mb: 4096

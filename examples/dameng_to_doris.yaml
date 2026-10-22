@@ -1,0 +1,186 @@
+# D2D Job 配置: 达梦 t_a → Doris t_b（ODBC 游标 + 查询侧下推）
+# 用法: d2d --config examples/dameng_to_doris.yaml [--dry-run]
+#
+# 架构说明：
+#   source.query  → 查询侧（显式下推到达梦：SELECT 列 / WHERE / ORDER BY / LIMIT）
+#   transform     → 引擎侧（读回后的纯转换：列映射 / 类型转换 / 常量列）
+#   常量列（如 source_system）由引擎构造，不占用数据库查询
+#
+# ⚠️ 本示例用 `method: odbc`，它的价值是**覆盖**而不是快：
+#    dmfldr 做不了的（带 WHERE 的行级裁剪、计算列、ORDER BY / LIMIT）它能做。
+#    全表大批量迁移请用 examples/dameng_to_doris_dmfldr.yaml。
+
+job:
+  name: "dameng_to_doris_ta_tb"
+
+# ── flow：执行拓扑。结构 = 拓扑，三段并发互不推导 ──
+flow:
+  source:
+    concurrency: 8             # 同时几条游标压在达梦上（**源库能接几个**）
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure   # 取数比解析慢时，让源端等一等即可
+  pipeline:
+    concurrency: 8             # 同时几个 task 在转换
+    # batch_bytes: 0           # 缺省不攒批（见 dmfldr 示例的说明）
+  sink:
+    concurrency: 4             # 同时几个 Stream Load 打向 Doris（**上限**，不是任务数）
+    batch_bytes: 100MB         # 内核一次递给连接器的数据上界 ┐ 谁先到谁触发
+    batch_rows: 100000         # 内核一次递给连接器的行数上界 ┘
+                               #   ⚠️ 别随意调小：每次写入有一份与大小无关的固定开销
+                               #      （开事务、提交、往返），实测 ~70MB 单元 86 s、
+                               #      ~90–100MB 单元 74–78 s，拐点在 ~90MB。
+                               #      详见 examples/dameng_to_doris_dmfldr.yaml 的说明
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+
+source:
+  connector: "dameng"
+  method: "odbc"
+  connection:
+    driver: "{DM8}"
+    server: "192.0.2.50"
+    port: 5236
+    database: "PROD"
+    username: "${DM_USER}"
+    password: "${DM_PASS}"
+  # schema 限定名（可选，生成 "PROD"."t_a"）
+  schema_name: "PROD"
+  table: "t_a"
+
+  # ── 查询侧：显式下推（引擎只做 SQL 字符串组装） ──
+  query:
+    # SELECT 列表；支持表达式 + 别名；缺省 = SELECT *
+    # 注意：分区列 id 若未列出，引擎会自动补齐（读回后由 Project 剔除）
+    columns:
+      - "id"
+      - "name"
+      - expr: "\"amount\" * 1.1"          # DB 侧计算列
+        alias: "scaled_amount"
+      - expr: "CASE WHEN \"status\" = 1 THEN 'A' ELSE 'B' END"
+        alias: "status_label"
+    # WHERE 片段（原样 SQL；引擎会 AND 上 partition 分区条件）
+    # 建议为主键/索引列建索引以获得最大收益
+    where_clause: |
+      "status" <> -1 AND "create_time" >= DATE'2026-01-01'
+    # ORDER BY 片段（可选）
+    order_by: |
+      "id" ASC
+    # LIMIT（可选）
+    # limit: 1000000
+
+  # ── 类型契约：启动期强制校验（防数据错乱，Forbidden 直接拒绝任务） ──
+  # 每列声明源库类型与目标库类型，经逻辑类型 + 兼容矩阵校验：
+  #   - BLOB → VARCHAR 会被拒绝（二进制转字符串必然乱码，需显式 Base64）
+  #   - NUMBER(38,10) → DECIMAL(19,4) 会警告（有损但允许）
+  type_contract:
+    - column: "id"
+      source_type: "BIGINT"
+      sink_type: "BIGINT"
+    - column: "name"
+      source_type: "VARCHAR2(200)"
+      sink_type: "VARCHAR(200)"
+    - column: "amount"
+      source_type: "NUMBER(19,4)"
+      sink_type: "DECIMAL(19,4)"
+    - column: "create_time"
+      source_type: "TIMESTAMP"
+      sink_type: "DATETIME"
+    - column: "status"
+      source_type: "NUMBER(1)"
+      sink_type: "TINYINT"
+    # 示例：BLOB 列必须先显式转 Base64 再声明，否则启动即失败
+    # - column: "payload"
+    #   source_type: "BLOB"
+    #   sink_type: "STRING"          # ← 会被拒绝
+
+  # ── 分区：取数范围怎么切（**与并发度无关**，详见 DESIGN-PARTITION.md）──
+  #
+  # 引擎只负责按声明切范围，再与 query.where_clause AND 组合进 WHERE。
+  # 切 8 段而 flow.source.concurrency = 8 → 8 路各跑一段；
+  # 切 8 段而并发 4 → 4 路从头跑到尾，谁腾出来谁接手下一段。
+  #   none  : 不分片
+  #   list  : 直接给 conditions 数组，每条一个分区 —— 零探测
+  #   range : 给 lower+upper 则零探测；不给则回退探测
+  #   hash  : MOD(HASH(col), n) = i —— 零探测
+  partition:
+    mode: "range"
+    column: "id"           # 分区列，建议主键或有索引的列
+    count: 8               # 切几片（**不是并发度**）
+    # 想完全避开探测，补上闭区间上下界即可（日期列同样支持，按时间跨度均分）：
+    # lower: "2026-01-01 00:00:00"
+    # upper: "2026-10-01 00:00:00"
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  properties：**这个源特有的**参数，引擎不解释、原样交给连接器。
+  #
+  #  fetch_size 是**数据库往返粒度**（一次网络来回拉多少行）——
+  #  它既不是并发（那是 flow.source.concurrency），也不是内存
+  #  （那是 flow.source.pool.capacity）。混进 flow 段就是又一团说不清的账；
+  #  混进顶层则会被误以为换个源也管用。
+  # ══════════════════════════════════════════════════════════════════════
+  properties:
+    fetch_size: 10000            # 游标每批拉多少行
+    query_timeout_sec: 3600      # 查询超时（秒）
+
+# ── 引擎侧：读回后的纯转换（查询侧已做行/列裁剪，这里只做适配） ──
+transform:
+  # 剔除引擎自动补的分区列（若 columns 未显式含它则无需此步）
+  - op: "project"
+    columns: ["id", "name", "scaled_amount", "status_label", "create_time"]
+
+  # 常量列：引擎构造，不读库
+  - op: "const_column"
+    name: "source_system"
+    value: "dm"
+
+  # 类型转换（Arrow compute kernel 向量化）
+  # - op: "cast"
+  #   mappings:
+  #     - column: "scaled_amount"
+  #       target_type: "float64"
+
+  # 列名映射：适配目标表列名
+  - op: "column_map"
+    mappings:
+      - from: "create_time"
+        to: "dt"
+      - from: "scaled_amount"
+        to: "amount"
+      - from: "status_label"
+        to: "status"
+
+sink:
+  connector: "doris"
+  connection:
+    fe_hosts:
+      - "192.0.2.10:8030"
+      - "192.0.2.11:8030"
+    username: "${DORIS_USER}"
+    password: "${DORIS_PASS}"
+  database: "db_b"
+  table: "t_b"
+  properties:
+    stream_load:
+      format: "csv"
+      column_separator: "\t"
+      line_delimiter: "\n"
+      max_filter_ratio: 0.0
+      strict_mode: true
+  write:
+    max_retries: 3
+    retry_backoff_ms: 1000
+
+# ══════════════════════════════════════════════════════════════════════
+#  engine：**内存账本 + 核验开关**。整段可以省略。
+#  memory_mb 只用于启动期六项相加的校验，**不推导任何并发**。
+# ══════════════════════════════════════════════════════════════════════
+engine:
+  memory_mb: 2048
+
+  # ── 核验开关（都缺省开）──
+  # verify_row_count: true        # 源端导出行数 vs 目标端确认载入行数，不一致即失败
+  # verify_forbidden_scan: true   # 直通载荷的受限字节扫描
+  # direct_preflight_scan: false  # 开工前整片预扫
+  # worker_threads: 0             # tokio 线程数；0 = CPU 核数

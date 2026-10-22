@@ -1,0 +1,66 @@
+# D2D Job 配置: PostgreSQL t_src → PostgreSQL t_dst
+# 用法: PG_USER=postgres PG_PASS=... d2d --config examples/postgres_to_postgres.yaml [--dry-run]
+#
+# 读走简单查询协议（simple query，结果全是文本），写走多行绑定参数 INSERT。
+
+job:
+  name: "postgres_to_postgres"
+
+flow:
+  source:
+    concurrency: 4
+    pool:
+      capacity: 64MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 4
+  sink:
+    concurrency: 2
+    batch_bytes: 32MB
+    batch_rows: 20000
+    pool:
+      capacity: 64MB
+      on_overflow: backpressure
+
+source:
+  connector: "postgres"
+  connection:
+    host: "192.0.2.13"
+    port: 5432
+    user: "${PG_USER}"
+    password: "${PG_PASS}"
+
+  # ⚠️ PostgreSQL 里 database 与 schema 是两层。这里的 `schema_name` 装的是
+  #    **数据库名**；表所在的 schema 固定用 `public`。
+  schema_name: "postgres"
+  table: "src_big"
+
+  # 查询侧（可选）。标识符用双引号 —— 这是 PostgreSQL 的标准写法。
+  # query:
+  #   columns: ["id", "name", "amount"]
+  #   where_clause: "\"flag\" = true"
+  #   order_by: "\"id\" ASC"
+  #   limit: 100000
+
+  partition:
+    mode: "range"
+    column: "id"
+    count: 4
+    lower: 1
+    upper: 200000
+
+sink:
+  connector: "postgres"
+  connection:
+    host: "192.0.2.13"
+    port: 5432
+    user: "${PG_USER}"
+    password: "${PG_PASS}"
+  database: "postgres"
+  table: "dst_big"
+  # 写入用的 cast 由**目标表的声明类型**决定（init 时读 information_schema），
+  # 写法是 `$n::text::目标类型` —— PostgreSQL 的参数是强类型的，不能直接绑文本。
+  # ⚠️ 不自动重试：超时 ≠ 没写进去。
+
+engine:
+  memory_mb: 2048

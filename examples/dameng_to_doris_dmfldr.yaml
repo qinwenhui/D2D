@@ -1,0 +1,271 @@
+# D2D Job 配置: 达梦全表高速导出（dmfldr）→ Doris
+# 用法: d2d --config examples/dameng_to_doris_dmfldr.yaml [--dry-run]
+#
+# ── 这份配置的骨架（先看这四段，再看细节）────────────────────────────
+#
+#   flow:       执行拓扑 —— 三段并发 + 两个池 + 攒批。**只有这一段管资源**
+#   source:     读什么、怎么连。连接器专属参数进 source.properties
+#   transform:  引擎侧纯转换（算子链为空时自动走直通快路）
+#   sink:       写到哪里。连接器专属参数进 sink.properties
+#   engine:     一个数字（内存预算）+ 三个核验开关。**不推导任何并发**
+#
+# ── 与 dameng_to_doris.yaml（odbc 方式）的差异 ──────────────────────
+#   - method: "dmfldr" 走 dmfldr OUT + TABLE 全表快载导出（服务端 fast loader），
+#     引擎侧对导出文本按字节分块并行解析 —— 适合全量/大批量迁移，比 ODBC 游标快一个量级
+#   - 查询侧能力收窄（TABLE 模式）：不支持 where / order_by / limit / 计算列 / DB 侧
+#     range·hash split；行级裁剪请改回 method: odbc + 查询侧下推
+#   - type_contract 由"必填校验"升级为"唯一 schema 来源"：dmfldr 文本不带类型信息，
+#     列序 = 契约声明序，导出列头会与契约逐列比对（schema drift 直接报错）
+#
+# dmfldr 前置条件：
+#   - 数据库服务器或迁移执行机上已安装 DM8 快速装载工具（dmfldr 可执行文件）
+#   - work_dir 所在磁盘需容纳全表文本导出的临时空间（任务结束自动清理）
+
+job:
+  name: "dameng_to_doris_dmfldr_ta_tb"
+
+# ══════════════════════════════════════════════════════════════════════
+#  flow：执行拓扑。**配置结构 = 拓扑结构，一眼能对上**
+#
+#      source_task ──► [source_pool] ──► pipeline_task ──► [sink_pool] ──► sink_task
+#         ×N_s            容量 C_s            ×N_p            容量 C_k          ×N_k
+#
+#  三个 concurrency 互相独立、**互不推导**：
+#    · source.concurrency —— 源库能接几个连接/进程（运维知道）
+#    · pipeline.concurrency —— 本机 CPU
+#    · sink.concurrency   —— 目标端能接几个并发导入（运维知道）
+#  填多少就是多少。内存不够时**池溢出到磁盘**，绝不偷偷砍并发。
+# ══════════════════════════════════════════════════════════════════════
+flow:
+  source:
+    concurrency: 16              # 同时几个取数单元（dmfldr 子进程 / JDBC 连接）
+    pool:
+      capacity: 512MB            # 源端产出在本进程里最多积压多少
+      on_overflow: spill         # spill（溢到磁盘，上游不减速）| backpressure | fail
+      # max_spill: 4GB           # 溢出的磁盘上限；超过即退化为背压
+      # spill_dir: /data/d2d_spill   # 缺省用系统临时目录
+
+  pipeline:
+    concurrency: 16              # 同时几个 task 在解析/转换
+    # batch_bytes: 0             # 缺省 0 = 不攒批：源端给多大就多大，零额外拷贝。
+                                 #   设成非零值（如 64MB）= 用一次 concat 拷贝
+                                 #   换更少的算子调用次数。纯优化项，不是必需项。
+    # batch_rows: 0              # 可选的行数兜底（0 = 不限）
+    # ⚠️ 这里**没有 pool** —— pipeline 坐在两个池中间，手里最多只持一批
+
+  sink:
+    concurrency: 8               # 同时几个 Stream Load 打向 Doris（**上限**，不是任务数）
+    batch_bytes: 100MB           # 内核一次递给连接器的字节上界  ┐ 谁先到谁触发
+    batch_rows: 200000           # 内核一次递给连接器的行数上界  ┘
+                                 #   ⚠️ 攒批**住在内核**：内核从 sink_pool 攒够一份才交给
+                                 #      连接器，连接器收到即写（它内部没有缓冲，也就没有
+                                 #      "空闲多久强制落盘"这个旋钮 —— 那是内部攒批的副产品）
+                                 #
+                                 #   ── 100MB 这个数是有来由的：**别随意调小** ──
+                                 #   每次写入有一份与大小无关的固定开销（开事务、提交、往返）。
+                                 #   实测同一份 1915 万行数据（.39，见 BENCH-ENV.md）：
+                                 #     ~70MB 单元 → 108 个单元 / 86 s
+                                 #     ~90–100MB  → 76–96 个 / **74–78 s**   ← 缺省落在这里
+                                 #     ~102MB     → 29–64 个 / 74–75 s（不再变快）
+                                 #   拐点在 ~90MB：过了它，写入成本从"事务开销主导"转成
+                                 #   "字节吞吐主导"。调小会掉进前者，白付固定开销；
+                                 #   调大则只在**sink 真是瓶颈**时才有效 —— 瓶颈在取数/解析时
+                                 #   100MB 调到 512MB 实测墙钟一模一样。
+    pool:
+      capacity: 512MB
+      on_overflow: spill
+
+source:
+  connector: "dameng"
+  # 读取方式：odbc（游标 + 查询侧下推）| dmfldr（全表快载导出）
+  method: "dmfldr"
+
+  # dmfldr 连接配置（组装 USERID=user/password@host:port [AS SYSDBA]）
+  #   注意：与 odbc 示例的键名不同（server/database/username 是 ODBC DSN 风格）
+  connection:
+    host: "192.0.2.50"
+    port: 5236
+    user: "${DM_USER}"                 # 建议对导出表有 SELECT 权限的账号
+    password: "${DM_PASS}"
+    # svc: "DMSERVER"                  # dm_svc.conf 服务名（优先于 host:port）
+    # auth_as: "SYSDBA"                # 需要时以管理员身份导出
+
+  schema_name: "PROD"                  # 生成 LOAD DATA ... INTO TABLE "PROD"."t_a"
+  table: "t_a"
+
+  # ── 查询侧：dmfldr 模式下只能声明纯列名，且列序必须与 type_contract 完全一致 ──
+  query:
+    columns:
+      - "id"
+      - "name"
+      - "amount"
+      - "create_time"
+      - "status"
+    # where_clause / order_by / limit / 表达式列 → 启动即报错，请改用 odbc
+
+  # ── 类型契约：dmfldr 模式的唯一 schema 来源（必填） ──
+  #   逐列声明达梦源类型 → 逻辑类型 → Arrow；导出的时间格式按契约精度生成 DATE FORMAT
+  type_contract:
+    - column: "id"
+      source_type: "BIGINT"
+      sink_type: "BIGINT"
+    - column: "name"
+      source_type: "VARCHAR2(200)"
+      sink_type: "VARCHAR(500)"
+    - column: "amount"
+      source_type: "NUMBER(19,4)"
+      sink_type: "DECIMAL(19,4)"
+    - column: "create_time"
+      source_type: "TIMESTAMP(6)"      # 带精度声明 → 控制文件生成 .ff6 时间格式
+      sink_type: "DATETIME(6)"
+    - column: "status"
+      source_type: "NUMBER(1)"
+      sink_type: "TINYINT"
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  分区：**唯一需要动脑子的一项**。它决定了导出方式，进而决定"切几段"。
+  #
+  #  ⚠️ 分区数 ≠ 并发度。分区 = 切几段（数据怎么分）；并发 = 同时跑几段
+  #     （flow.source.concurrency，源库能接几个）。切 16 段并发 4 路，
+  #     那就是 4 路从头跑到尾、谁腾出来谁接手下一段。
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  #   none  : 不分片 → 单进程整表导出。小表 / 几万行 / 增量同步就用它
+  #   list  : 直接给条件数组，每条一个分区 —— 零探测
+  #   range : 给 lower+upper 则零探测；不给则查分区字典（0.1s，不扫数据）
+  #   hash  : MOD(HASH(col), n) = i —— 零探测，无边界可依时用
+  #
+  # 只有数据量足够大时分片才划算：几万行的表切成 300 片，
+  # 换来的只是 300 次进程启动开销。
+  partition:
+    mode: "none"
+
+  # 分片模式示例（数据量大时把上面那段换成这个）：
+  #
+  #   partition:
+  #     mode: "range"
+  #     column: "PDATE"
+  #     count: 16                    # 切几片
+  #
+  # 数据倾斜时（比如 97% 的行挤在两个月）改用 list 手工切：
+  #
+  #   partition:
+  #     mode: "list"
+  #     conditions:
+  #       - "PDATE < TIMESTAMP'2026-01-01 00:00:00'"
+  #       - "PDATE >= TIMESTAMP'2026-01-01 00:00:00' AND PDATE < TIMESTAMP'2026-01-05 00:00:00'"
+  #
+  # ⚠️ list 的切法**正确性由你负责**：少写一段就是少迁一段数据。
+  #    配合行数对账，真漏了会在最后一步失败（源端行数 ≠ 目标端行数）。
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  properties：**这个源特有的**参数，引擎不解释、原样交给连接器。
+  #
+  #  判据：换成别的源还管用吗？
+  #    管用  → 写在顶层（connection / table / query / partition / type_contract）
+  #    不管用 → 写在这里
+  #
+  #  比如 fetch_size（JDBC/ODBC 一次网络来回拉多少行）只有连接型驱动才有，
+  #  dmfldr 是整文件产出，根本不看它 —— 所以它在 properties 里，不在 flow 里。
+  #  flow.source 管的是**并发与内存**，那是任何源都绕不开的两件事。
+  # ══════════════════════════════════════════════════════════════════════
+  properties:
+    # dmfldr 自己的调优参数。日常只需要动前四项；
+    # 下面「高级」那几项直接影响导出产物的格式，改错了会让解析结果错位。
+    dmfldr:
+      executable: "dmfldr"           # dmfldr 可执行文件（PATH 名或绝对路径）
+      work_dir: "/data/d2d_dmfldr"   # 导出临时目录（需容纳全表文本；结束自动清理）
+      character_code: "utf8"         # 源库字符集：utf8 | gbk | gb18030 | single_byte | euc_kr
+
+      # ── 高级（不改也能跑；分片模式下下面几项会被强制为 dmfldr 缺省）──
+      field_seperator: "|"           # 列分隔符（单字符）
+      null_mode: true                # 空值导出为 NULL 标记串
+      null_str: "NULL"
+      escape: "\\"                   # 转义符（数据含分隔符/换行时用）
+      colname_heading: true          # 导出列头行，与契约逐列校验（防 schema drift）
+      lob_as_varchar: false          # CLOB 内联为 VARCHAR（≤10MB）
+      buffer_node_size: 64           # dmfldr 读缓冲 MB —— **每个子进程独享**
+      task_thread_number: 0          # dmfldr 内部线程数（0=自动）
+
+      # ── 产物内部的解析并行度（**连接器自己的旋钮**）──
+      #
+      #  内核只按 flow.source.concurrency 发券（同时几个任务在往池里放）；
+      #  一个任务**内部**怎么干活（把产物切几块、并行解析几个）是这个连接器自己的事，
+      #  内核不切块、也看不到产物的形状。
+      #
+      #  ⚠️ 缺省 1 = 单文件顺序解析。`TABLE=` 模式（不配 partition）的特性就是
+      #     "一个进程整表读"，大表不分片读是你选了这个模式 —— 同"用一条 JDBC
+      #     连接读大表"，连接池不会替你拆成多连接。真拆了，CPU/内存压力谁管？
+      #     要快就显式调大：代价是每个 source_task 多占 parse_parallel × 单批 内存，
+      #     这笔账**会进启动期账本**，装不下直接拒绝启动。
+      parse_parallel: 1
+
+# ── 引擎侧：读回后的纯转换（算子链为空则自动走直通快路） ──
+transform:
+  - op: "const_column"
+    name: "source_system"
+    value: "dm"
+  - op: "column_map"
+    mappings:
+      - from: "create_time"
+        to: "dt"
+
+sink:
+  connector: "doris"
+  connection:
+    fe_hosts:
+      - "192.0.2.10:8030"
+      - "192.0.2.11:8030"
+    username: "${DORIS_USER}"
+    password: "${DORIS_PASS}"
+    # be_hosts: ["192.0.2.20:18040"]   # Stream Load 直连 BE（强烈建议，见文档）
+  database: "db_b"
+  table: "t_b"
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  properties：**这个目标特有的**。
+  #
+  #  ⚠️ 攒批阈值（batch_rows / batch_bytes）**不在这里** ——
+  #     它们说的是"一次发多少"，是每个目标端都要回答的通用问题，
+  #     与是不是 Doris 无关，所以住在 flow.sink，而且由**内核**落实。
+  #     这里只留 Doris 真正私有的东西（换个目标端这些名字根本不存在）。
+  # ══════════════════════════════════════════════════════════════════════
+  properties:
+    stream_load:
+      format: "csv"
+      column_separator: "\t"
+      line_delimiter: "\n"
+      max_filter_ratio: 0.0
+      strict_mode: true
+
+  write:
+    max_retries: 3
+    retry_backoff_ms: 1000
+
+# ══════════════════════════════════════════════════════════════════════
+#  engine：**内存账本 + 核验开关**。整段可以省略（缺省值都安全）。
+#
+#  memory_mb **不推导任何并发**。启动期把六项常驻相加给它看：
+#
+#      源端取数单元        N_s × 每单元常驻（dmfldr 是子进程，独立于本进程）
+#      source_pool         C_s
+#      pipeline 工作集     N_p × batch_bytes
+#      转换中间态          与上一项同量级（cast 变宽 / 投影新建 buffer）
+#      sink_pool           C_k
+#      sink 工作集         N_k × batch_bytes
+#
+#  装得下 → 打印逐项明细，开跑
+#  装不下 → **拒绝启动**，并告诉你是哪一项超了、有哪三条处置方式
+#           （调大 memory_mb / 调小池容量 / 给池配 on_overflow: spill）
+#
+#  绝不因为内存不够就把并发改小 —— 那会让你以为"这就是正常速度"。
+# ══════════════════════════════════════════════════════════════════════
+engine:
+  memory_mb: 4096              # 全链路内存预算
+
+  # ── 核验开关（都缺省开，除非有明确理由否则别关）──
+  # verify_row_count: true        # 源端导出行数 vs 目标端确认载入行数，不一致即失败
+  # verify_forbidden_scan: true   # 直通载荷的受限字节扫描（防目标端误解字节）
+  # direct_preflight_scan: false  # 开工前整片预扫（多读一遍源文件，换"发之前就失败"）
+
+  # worker_threads: 0            # tokio 运行时线程数；0 = CPU 核数

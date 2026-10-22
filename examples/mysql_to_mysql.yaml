@@ -1,0 +1,73 @@
+# D2D Job 配置: MySQL t_src → MySQL t_dst（读走 MySQL 协议，写走多行 INSERT）
+# 用法: d2d --config examples/mysql_to_mysql.yaml [--dry-run]
+#
+# 这是**同库不同表**的迁移样例；换成 MySQL → Doris / 达梦 只需改 sink 段。
+
+job:
+  name: "mysql_to_mysql"
+
+flow:
+  source:
+    concurrency: 4             # 同时几条连接压在源库上
+    pool:
+      capacity: 64MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 4
+  sink:
+    concurrency: 2             # 同时几条写入（**上限**，不是任务数）
+    # 一次递多少由**内核**攒（连接器内部不攒）；每次写入有固定开销，
+    # 别调得太小 —— 实测拐点在 ~90MB，见 examples/doris_to_doris.yaml 的说明
+    batch_bytes: 32MB
+    batch_rows: 20000
+    pool:
+      capacity: 64MB
+      on_overflow: backpressure
+
+source:
+  connector: "mysql"
+  connection:
+    host: "192.0.2.10"
+    port: 3306
+    user: "${MYSQL_USER}"
+    password: "${MYSQL_PASS}"   # 口令里可以有 @ / # 等字符，写在 YAML 里不用转义
+
+  # MySQL 的库名放在引擎给"源的命名空间"留的通用位置（与达梦放 schema 同一处）
+  schema_name: "d2d_probe"
+  table: "src_big"
+
+  # ── 查询侧（可选）：显式下推 ──
+  # ⚠️ 标识符用**反引号**。MySQL 默认 sql_mode 里双引号是字符串字面量：
+  #    `SELECT "id"` 返回的是常量 'id'。
+  # query:
+  #   columns: ["id", "name", "amount"]
+  #   where_clause: "`flag` = 1"
+  #   order_by: "`id` ASC"
+  #   limit: 100000
+
+  # ── 分区：取数范围怎么切（与并发度无关）──
+  partition:
+    mode: "range"
+    column: "id"
+    count: 4
+    lower: 1
+    upper: 200000
+
+  # properties:
+  #   fetch_size: 10000          # 驱动每批拉多少行（本连接器暂未使用）
+
+sink:
+  connector: "mysql"
+  connection:
+    host: "192.0.2.10"
+    port: 3306
+    user: "${MYSQL_USER}"
+    password: "${MYSQL_PASS}"
+  database: "d2d_probe"
+  table: "dst_big"
+  # MySQL 写入没有目标端特有旋钮：每段行数由"占位符上限 65535 ÷ 列数"定，
+  # 每段字节由 max_allowed_packet 留半余量（32 MB）定。
+  # ⚠️ 不自动重试：超时不等于没写进去，重试可能插两遍。失败了重跑由你决定。
+
+engine:
+  memory_mb: 2048

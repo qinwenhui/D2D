@@ -1,0 +1,67 @@
+# D2D Job 配置: MySQL t_src → QSDB（HTTP 服务模式）
+# 用法: MYSQL_USER=... MYSQL_PASS=... d2d --config examples/mysql_to_qsdb_http.yaml [--dry-run]
+#
+# QSDB 部署成常驻服务时（`qsdb server --path /data/qsdb --addr 0.0.0.0:9430`），
+# D2D 通过官方 qsdb-client 走 HTTP：
+#   写 = Arrow IPC POST /api/v1/write（服务端 Qsdb::append）
+#   读 = query_stream（rows 通道，客户端内存恒定）
+#
+# ⚠️ qsdb-client 不做 TLS：只接受 http://host:port。要加密请在 QSDB 前挂 TLS 终止代理。
+
+job:
+  name: "mysql_to_qsdb_http"
+
+flow:
+  source:
+    concurrency: 4
+    pool:
+      capacity: 64MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 4
+  sink:
+    concurrency: 4
+    # 一份数据 = 一次 HTTP /write 请求 = 一次 QSDB 提交
+    batch_bytes: 64MB
+    batch_rows: 65536
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+
+source:
+  connector: "mysql"
+  connection:
+    host: "192.0.2.10"
+    port: 3306
+    user: "${MYSQL_USER}"
+    password: "${MYSQL_PASS}"
+  schema_name: "d2d_probe"
+  table: "src_big"
+  partition:
+    mode: "range"
+    column: "id"
+    count: 4
+    lower: 1
+    upper: 200000
+
+sink:
+  connector: "qsdb"
+  method: "http"                  # 显式选 HTTP；只给 url 时也可自动推断
+  connection:
+    url: "http://192.0.2.20:9430"
+    # Basic 认证（与下面 token 二选一）；实际配置里可把值写成环境变量占位符
+    # user: "qsdb_user"
+    # password: "qsdb_pass"
+    # 或 Bearer（服务端 --token / auth/login 签发）
+    # token: "eyJ..."
+    connect_timeout_ms: 10000
+    query_timeout_ms: 0           # 0/缺省 = 不设服务端超时
+  database: "default"             # qsdb server 是单库服务，只能 default
+  table: "dst_big"
+  properties:
+    create_table: true            # 表不存在时按首批 Arrow schema 自动建表
+    # partition_by: ["dt"]        # QSDB 原生分区（源数据里必须有这一列）
+    compression: "zstd"           # zstd（缺省）| snappy
+
+engine:
+  memory_mb: 2048

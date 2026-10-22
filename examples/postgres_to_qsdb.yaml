@@ -1,0 +1,59 @@
+# D2D Job 配置: PostgreSQL t_src → QSDB dst_big（嵌入式、Arrow 直写）
+# 用法: PG_USER=postgres PG_PASS=... d2d --config examples/postgres_to_qsdb.yaml [--dry-run]
+#
+# QSDB 是嵌入式列式库：D2D 直接打开 connection.path 指向的**数据目录**，
+# 写入就是 `Qsdb::append(RecordBatch)`，没有 INSERT 拼装、没有文本编解码。
+# 前提：D2D 与 QSDB 的数据目录在**同一台机器**上可见。
+#
+# 若 QSDB 是常驻的 `qsdb server`，把 sink 改成 HTTP 模式即可：
+#   method: "http"
+#   connection: { url: "http://192.0.2.5:9430", user: "...", password: "..." }
+# 见 examples/mysql_to_qsdb_http.yaml。
+
+job:
+  name: "postgres_to_qsdb"
+
+flow:
+  source:
+    concurrency: 1          # QSDB 写入端不需要多分片；源端仍可用 PostgreSQL range 分片
+  sink:
+    concurrency: 4
+    batch_bytes: 64MB
+    batch_rows: 65536
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+
+source:
+  connector: "postgres"
+  connection:
+    host: "192.0.2.13"
+    port: 5432
+    user: "${PG_USER}"
+    password: "${PG_PASS}"
+  schema_name: "postgres"   # PostgreSQL 的 database 名
+  table: "src_big"
+  partition:
+    mode: "range"
+    column: "id"
+    count: 4
+    lower: 1
+    upper: 200000
+
+sink:
+  connector: "qsdb"
+  connection:
+    path: "/data/qsdb"      # QSDB 数据目录（本地盘或挂载点）
+    cache_mb: 1024          # 可选：热数据缓存预算（MB）；缺省用 QSDB 自己的 256MB
+  database: "default"       # QSDB 嵌入式写 API 目前只支持 default 库
+  table: "dst_big"
+  properties:
+    # 表不存在时按首批数据的 Arrow schema 自动建表（缺省 true）
+    create_table: true
+    # 可选：QSDB 原生分区（按源数据的列路由；列名必须出现在批次里）
+    # partition_by: ["dt"]
+    # 可选：zstd（缺省）| snappy
+    compression: "zstd"
+
+engine:
+  memory_mb: 2048

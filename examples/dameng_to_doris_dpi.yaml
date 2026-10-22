@@ -1,0 +1,99 @@
+# D2D Job 配置: 达梦 → Doris（method: dpi，达梦原生 DPI 数组取数）
+#
+# 与 dmfldr 的区别：
+#   - 没有导出文件/子进程，一次 read = 一条连接 + 一条 SELECT
+#   - NULL 由 DPI 指示器给出，直通面写 `\N` —— Doris 里是真正的 NULL
+#   - 直通值里不能含 `|` / CR / LF / NUL / `\`（逻辑面没有这个限制）
+#
+# 运行前提：
+#   - 目标机装达梦客户端，提供 libdmdpi.so / dmdpi.dll
+#   - 64 位目标（DPI 的 slength/ulength 在 DM64 下是 8 字节）
+#
+# 用法: d2d --config examples/dameng_to_doris_dpi.yaml [--dry-run]
+
+job:
+  name: "dameng_dpi_to_doris"
+
+flow:
+  source:
+    concurrency: 8
+    pool:
+      capacity: 1GB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 8
+  sink:
+    concurrency: 8
+    # 与 source.properties.dpi.physical_block_mb 对齐：一个 sink 批次只含一个分片的块
+    batch_bytes: 33554432
+    batch_rows: 250000
+    pool:
+      capacity: 2GB
+      on_overflow: backpressure
+
+source:
+  connector: "dameng"
+  method: "dpi"
+  connection:
+    host: "192.0.2.65"
+    port: 5238
+    user: "APP"
+    password: "***"
+  schema_name: "APP"
+  table: "T_ORDER"
+
+  query:
+    columns: &cols
+      - "ID"
+      - "ORDER_NO"
+      - "AMOUNT"
+      - "CREATED_AT"
+
+  # 契约 = schema + SELECT 列序（两种方法共用同一条规矩）
+  type_contract:
+    - {column: "ID",         source_type: "BIGINT",       sink_type: "BIGINT"}
+    - {column: "ORDER_NO",   source_type: "VARCHAR(64)",  sink_type: "VARCHAR(64)"}
+    - {column: "AMOUNT",     source_type: "DECIMAL(18,2)", sink_type: "DECIMAL(18,2)"}
+    - {column: "CREATED_AT", source_type: "TIMESTAMP(6)", sink_type: "DATETIME(6)"}
+
+  # 分片：与 dmfldr/odbc 同一套内核切法。
+  # range 需要显式 lower+upper（DPI MVP 不做 MIN/MAX 探测）；list/hash/none 均可。
+  partition:
+    mode: "hash"
+    column: "ID"
+    count: 8
+
+  properties:
+    dpi:
+      # 不配则按 libdmdpi.so / dmdpi.dll 在 LD_LIBRARY_PATH 里找
+      library: "/opt/dmdbms/drivers_odbc/libdmdpi.so"
+      fetch_rows: 4000        # 数组取数行数（spike 拐点：4000）
+      column_bytes: 256       # 字符串列缓冲下限；实际按 desc 列宽 ×4 放大
+      character_code: "utf8"  # 是"会话字节的声明"，不是设置
+      physical_block_mb: 64   # 稳态块；必须 ≥ sink.batch_bytes 对应大小
+      first_block_mb: 33      # 首块，先发一车
+
+sink:
+  connector: "doris"
+  connection:
+    fe_hosts: ["192.0.2.47"]
+    http_port: 18030
+    be_hosts: ["192.0.2.47:18040"]
+    username: "root"
+    password: "***"
+  database: "app_js_produce"
+  table: "t_order"
+  write:
+    max_retries: 3
+    retry_backoff_ms: 1000
+  properties:
+    stream_load:
+      format: "csv"
+      column_separator: "|"
+      line_delimiter: "\n"
+      max_filter_ratio: 0.0
+      strict_mode: false
+
+engine:
+  memory_mb: 8192
+  worker_threads: 0

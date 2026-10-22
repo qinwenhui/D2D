@@ -1,0 +1,102 @@
+# ══════════════════════════════════════════════════════════════════════
+#  达梦 → 达梦（同库搬表 / 跨 schema 复制）
+#
+#  这份示例演示的是 **`dameng` 作为目标端**（X → 达梦）。
+#  它同时是"写入路径能端到端跑通"的最小可复现样本：
+#  `--dry-run` 走注册 → 类型契约 → 内存账；真跑则 source(odbc 游标)
+#  → 内核三段拓扑 → sink(odbc 绑定插入)。
+#
+#  ⚠️ 读方向选 odbc 而不是 dmfldr：这里要的是"能表达 WHERE 与任意列"
+#     的覆盖路径，且目标端插入本来就慢，读得再快也没用。
+# ══════════════════════════════════════════════════════════════════════
+
+job:
+  name: "dameng_copy_table"
+
+flow:
+  source:
+    concurrency: 4
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 4
+  sink:
+    concurrency: 4
+    # 一次写入的字节上界（内核攒够才递给连接器）。
+    # ⚠️ 太小会亏：目标端每次写入的代价几乎与大小无关（见 BENCH-ENV.md），
+    #    单元太碎会让耗时按"次数"涨。这个量级以下不值得再小。
+    batch_bytes: 64MB
+    batch_rows: 100000
+    pool:
+      capacity: 256MB
+      on_overflow: spill
+
+source:
+  connector: "dameng"
+  method: "odbc"                 # 覆盖路径：WHERE / 计算列 / ORDER BY 都能表达
+  connection:
+    dsn: "${DM_DSN}"             # 见 BENCH-ENV.md「.39 上的 ODBC 环境」
+    user: "${DM_USER}"
+    password: "${DM_PASS}"
+  schema_name: "APP"
+  table: "D2D_SINK_SRC"
+  # 类型契约是**权威 schema**（也是启动期兼容性校验的依据）——
+  # 源声明类型 → 目标声明类型必须逐列兼容，环回迁移就是同名同型。
+  type_contract:
+    - {column: "ID",   source_type: "BIGINT",        sink_type: "BIGINT"}
+    - {column: "NAME", source_type: "VARCHAR(200)",  sink_type: "VARCHAR(200)"}
+    - {column: "AMT",  source_type: "DECIMAL(19,4)", sink_type: "DECIMAL(19,4)"}
+    - {column: "TS",   source_type: "TIMESTAMP",     sink_type: "TIMESTAMP"}
+    - {column: "FLAG", source_type: "INT",           sink_type: "INT"}
+  query:
+    columns: ["ID", "NAME", "AMT", "TS", "FLAG"]
+  partition:
+    mode: "range"
+    column: "ID"
+    lower: 1
+    upper: 20001
+    count: 4
+
+sink:
+  connector: "dameng"
+  method: "odbc"                 # 绑定参数的多行 INSERT（覆盖路径）
+  connection:
+    dsn: "${DM_DSN}"
+    user: "${DM_USER}"
+    password: "${DM_PASS}"
+  database: "APP"     # 达梦里 `database` 就是模式名
+  table: "D2D_SINK_DST"
+  # ⚠️ 本目标端特有的参数才放这里（引擎不解释）：
+  #   max_params: 2000           # 单条 INSERT 最多绑几个参数（物理约束，在上界之下再细分）
+
+# ── 想快就换 method: dmfldr（IN 快载）──
+#
+#   method: "dmfldr"
+#   connection:                # ⚠️ dmfldr 的 USERID 串**不吃 DSN**，要 host:port
+#     host: "192.0.2.65"
+#     port: 5238
+#     user: "${DM_USER}"
+#     password: "${DM_PASS}"
+#   properties:
+#     dmfldr:
+#       executable: "dmfldr"
+#       work_dir: "/data/d2d_in"       # 每份数据一个临时目录，成功即清
+#       # field_seperator: "|"         # 值里出现它会让这一份**失败**（dmfldr 无法转义分隔符）
+#       # null_str: "NULL"             # 值恰好等于它也会失败（会被读成空值）
+#       # direct: false               # 缺省就是 false，别轻易改，见下
+#
+#   两条路的取舍：
+#     dmfldr 快，但**值里不能有分隔符/换行**（撞车就大声失败，出路是换 field_seperator）；
+#     odbc   慢（绑定参数、逐段多行 INSERT），但值不受限、也不经文本。
+#
+#   ⚠️ `direct: true` 是什么：dmfldr 的 DIRECT 快路**直接写 B 树、不检查约束**
+#      （手册：「约束的检查等由用户保证」）。实测（2026-10-17）：往主键表灌两行
+#      `ID=1`，DIRECT=TRUE 下两行都进去，**之后整张表的 UPDATE/DELETE/INSERT 全部失败**，
+#      只剩 SELECT —— 表被写成了不可更新的状态。所以本连接器的缺省是 `direct: false`
+#      （约束照查，装载慢 4–5.4×，2M 行 1.55 s → 8.43 s，仍远快于 ODBC）。
+#      只有在**能保证这批数据不会违反目标表任何主键/唯一索引/外键/CHECK**时才开它
+#      —— 典型场景是灌进一张刚建好、确定为空、且数据本身无重复的目标表。
+
+engine:
+  memory_mb: 4096

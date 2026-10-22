@@ -1,0 +1,92 @@
+# D2D Job 配置: Doris → 达梦（sink.method: dpi，数组参数绑定）
+#
+# 为什么用 dpi 写入：
+#   - 值不受文本限制：含 `|` / 换行 / 反斜杠都能原样写入（绑定参数，不经文本）
+#   - NULL 用指示器表达，和空串严格区分，不需要 `null_str` 字面量
+#   - 没有临时数据文件/子进程；约束始终由数据库检查
+#
+# 与另外两条写入路径的取舍：
+#   dmfldr  最快（direct: true 时），但值里不能有分隔符/换行，且有临时文件与子进程；
+#   odbc    最通用，但慢（多行 VALUES 文本拼接）；
+#   dpi     一次 dpi_exec 执行一整块参数集，速度与安全性的折中。
+#
+# 运行前提：
+#   - 执行机装达梦客户端，提供 libdmdpi.so / dmdpi.dll
+#   - 客户端会话字符集是 UTF-8（本方法只接受 character_code: utf8）
+#   - 64 位目标（DPI 的 slength/ulength 在 DM64 下是 8 字节）
+#
+# 用法: d2d --config examples/doris_to_dameng_dpi.yaml [--dry-run]
+
+job:
+  name: "doris_to_dameng_dpi"
+
+flow:
+  source:
+    concurrency: 8
+    pool:
+      capacity: 1GB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 8
+  sink:
+    # 30M 行 × 28 列实测：8 路 → 79.7s，16 路 → 70.1s（同机 dmfldr direct=false 为 98.4s）
+    concurrency: 16
+    # 内核攒够一份才递给连接器一次；连接器内部不攒批。
+    batch_bytes: 64MB
+    batch_rows: 100000
+    pool:
+      capacity: 2GB
+      on_overflow: backpressure
+
+source:
+  connector: "doris"
+  connection:
+    fe_hosts: ["192.0.2.47"]
+    query_port: 19030          # FE 的 MySQL 协议口（读）
+    username: "root"
+    password: "***"
+
+  schema_name: "app_js_produce"
+  table: "t_order"
+
+  query:
+    # Doris 侧用真实列名（通常小写）；顺序即 SELECT 顺序
+    columns: ["id", "order_no", "amount", "created_at"]
+
+  partition:
+    mode: "hash"
+    column: "id"
+    count: 16
+
+# ── 列名大小写：Doris 返回的是表上真实的列名（通常小写），而达梦的
+#    引用标识符区分大小写。目标列是大写就映射一下（纯元数据操作，零拷贝）。
+transform:
+  - op: "column_map"
+    mappings:
+      - {from: "id",         to: "ID"}
+      - {from: "order_no",   to: "ORDER_NO"}
+      - {from: "amount",     to: "AMOUNT"}
+      - {from: "created_at", to: "CREATED_AT"}
+
+sink:
+  connector: "dameng"
+  method: "dpi"
+  connection:
+    host: "192.0.2.65"
+    port: 5238
+    user: "APP"
+    password: "***"
+  database: "APP"   # 达梦里 database 就是模式名
+  table: "T_ORDER"
+
+  properties:
+    dpi:
+      # 不配则按 libdmdpi.so / dmdpi.dll 在 LD_LIBRARY_PATH 里找
+      library: "/opt/dmdbms/drivers_odbc/libdmdpi.so"
+      param_rows: 20000       # 一次 dpi_exec 执行多少行（数组 DML；实测拐点）
+      max_buffer_mb: 64       # 单块参数缓冲上限；遇到超长值会自动缩块
+      character_code: "utf8"  # 是"会话字节的声明"，不是设置；写侧目前只接受 utf8
+
+engine:
+  memory_mb: 8192
+  worker_threads: 0

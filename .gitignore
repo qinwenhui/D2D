@@ -7,7 +7,8 @@
 /.workbuddy-ai/
 /spike/
 /测试/
-/examples/
+# 示例配置随仓库发布；bench 用的那组是本机环境，不提交
+/examples/qsdb_bench/
 /scripts/
 
 # Internal development docs, reports, screenshots, logs
