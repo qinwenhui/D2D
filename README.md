@@ -1,7 +1,15 @@
 # D2D
 
+[![CI](https://github.com/qinwenhui/D2D/actions/workflows/ci.yml/badge.svg)](https://github.com/qinwenhui/D2D/actions/workflows/ci.yml)
+
+**A bounded-memory, Arrow-native data migration engine.** It reads a source database in
+parallel partitions, applies an optional transform pipeline, and writes to the target; for
+pure move jobs the bytes can pass through without being parsed into Arrow.
+
 **基于 Arrow 的有界内存数据迁移引擎。** 从源库分片并行读取，经过可选的转换流水线，
 写入目标库；无转换的纯搬运场景可以让字节不经过 Arrow 解析。
+
+> Documentation is currently in Chinese.
 
 > 0.1.x：配置与公开 API 仍可能调整。
 
@@ -65,6 +73,15 @@ Rust 1.88+。
 ```bash
 cargo build --release
 ```
+
+Linux 构建需要 unixODBC 开发包（达梦 `odbc` 路径在链接期就要 `-lodbc`，
+即便本次任务不用它）：
+
+- Debian / Ubuntu：`apt install unixodbc-dev`
+- CentOS 7 / RHEL 7：`yum install unixODBC-devel`
+
+在 CentOS 7（glibc 2.17）上运行发布产物时，需要在 CentOS 7 兼容环境里构建；
+在较新的发行版上直接编译会引用更高的 glibc 符号版本。
 
 ## 快速开始
 

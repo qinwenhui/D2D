@@ -27,6 +27,12 @@ version = "0.1.0"
 edition = "2021"
 authors = ["D2D Team"]
 license = "MIT OR Apache-2.0"
+description = "A bounded-memory, Arrow-native data migration engine between databases"
+repository = "https://github.com/qinwenhui/D2D"
+homepage = "https://github.com/qinwenhui/D2D"
+readme = "README.md"
+keywords = ["database", "migration", "etl", "arrow", "data-transfer"]
+categories = ["database", "command-line-utilities"]
 # Arrow 60 要求 1.88（53 只要求 1.70）。基准机是 Rust 1.99。
 rust-version = "1.88"
 
