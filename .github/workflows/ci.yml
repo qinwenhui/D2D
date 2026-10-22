@@ -38,7 +38,7 @@ jobs:
       # 链接期就需要 unixODBC，哪怕本次任务不用 odbc method。
       - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev pkg-config libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
       # 需要真库的集成测试都是 #[ignore]，CI 里不会连外部服务。
       - name: Build
         shell: bash
@@ -75,9 +75,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: lint
-      # reqwest 在 Linux 上默认走 native-tls，openssl-sys 的 build script 需要它
-      - name: Install Linux build deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev unixodbc-dev
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -92,8 +89,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
-      - name: Install Linux build deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       # `cargo check` 不链接最终产物，不需要 unixODBC
       - name: cargo check
         run: cargo check --workspace --locked
@@ -129,7 +124,7 @@ jobs:
             "$IMAGE" \
             bash -ec '
               # aws-lc-sys 需要 cmake；EPEL 提供的是 cmake3
-              yum install -y unixODBC-devel openssl-devel curl cmake3
+              yum install -y unixODBC-devel curl cmake3
               command -v cmake >/dev/null || ln -sf /usr/bin/cmake3 /usr/local/bin/cmake
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"

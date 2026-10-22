@@ -59,7 +59,10 @@ serde_yaml = "0.9"
 clap = { version = "4.5", features = ["derive"] }
 
 # HTTP
-reqwest = { version = "0.12", features = ["json", "stream"] }
+#
+# 用 rustls 而不是默认的 native-tls：CentOS 7 只有 OpenSSL 1.0.2，而当前
+# openssl-sys 最低要求 1.1.0，native-tls 会让发布产物根本编不出来。
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 
 # MySQL 协议（Doris Source 读方向：Doris FE 的只读口就是 MySQL 协议）
 #
