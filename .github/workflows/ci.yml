@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: windows-x86_64
+            os: windows-latest
+          - name: windows-aarch64
+            os: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      # d2d-dameng 的 ODBC 路径在 Linux 上走 `#[link(name = "odbc")]`，
+      # 链接期就需要 unixODBC，哪怕本次任务不用 odbc method。
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+      # 需要真库的集成测试都是 #[ignore]，CI 里不会连外部服务。
+      - name: Build
+        run: cargo build --workspace --all-targets --locked
+      - name: Test
+        run: cargo test --workspace --lib --tests --locked
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  msrv:
+    name: MSRV 1.88
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      # `cargo check` 不链接，不需要 unixODBC
+      - name: cargo check
+        run: cargo check --workspace --locked
+
+  # CentOS 7 = glibc 2.17 / kernel 3.10。在 ubuntu-24.04 上直接编出来的 GNU
+  # 产物会引用 GLIBC_2.34+，所以发布产物必须在老基线里构建。
+  # 这个 job 平时就跟着 main / PR 跑，不要只在打 tag 时才第一次执行。
+  centos7:
+    name: build / centos7 (glibc 2.17)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # 固定编译器版本，避免 stable 漂移影响发布产物
+      RUST_VERSION: 1.88.0
+      # 想彻底钉死可改成 image@sha256:<digest>（首次跑完后
+      # `docker inspect --format '{{index .RepoDigests 0}}' <image>` 可取）
+      IMAGE: quay.io/pypa/manylinux2014_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull build image
+        run: |
+          for i in 1 2 3; do
+            docker pull "$IMAGE" && exit 0
+            echo "pull failed (attempt $i), retrying..."
+            sleep 15
+          done
+          exit 1
+      - name: Build in CentOS 7-compatible image
+        run: |
+          docker run --rm -v "$PWD":/src -w /src \
+            -e RUST_VERSION="$RUST_VERSION" \
+            "$IMAGE" \
+            bash -ec '
+              yum install -y unixODBC-devel curl
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+              . "$HOME/.cargo/env"
+              cargo build --release --locked -p d2d-cli
+            '
+      # 容器里是 root，target/ 归 root 所有；交还给 runner 用户
+      - name: Fix workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" target
+      - name: Verify glibc symbol versions
+        run: |
+          file target/release/d2d
+          max=$(objdump -T target/release/d2d \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+          echo "max required glibc: ${max:-none}"
+          if [ "$(printf '%s\n' GLIBC_2.17 "$max" | sort -V | tail -1)" != "GLIBC_2.17" ]; then
+            echo "::error::binary requires ${max}, newer than GLIBC_2.17"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d2d-linux-x86_64-glibc217
+          path: target/release/d2d
+          if-no-files-found: error
