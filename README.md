@@ -68,17 +68,23 @@ source:
 
 ## 构建
 
-Rust 1.88+。
+Rust 1.89+。
 
 ```bash
 cargo build --release
 ```
 
-Linux 构建需要 unixODBC 开发包（达梦 `odbc` 路径在链接期就要 `-lodbc`，
-即便本次任务不用它）：
+Linux 构建需要 unixODBC 与 OpenSSL 开发包：
 
-- Debian / Ubuntu：`apt install unixodbc-dev`
-- CentOS 7 / RHEL 7：`yum install unixODBC-devel`
+- unixODBC：达梦 `odbc` 路径在链接期就要 `-lodbc`，即便本次任务不用它；
+- OpenSSL：`reqwest` 在 Linux 上默认走 native-tls。
+
+```bash
+# Debian / Ubuntu
+apt install unixodbc-dev pkg-config libssl-dev
+# CentOS 7 / RHEL 7
+yum install unixODBC-devel openssl-devel
+```
 
 在 CentOS 7（glibc 2.17）上运行发布产物时，需要在 CentOS 7 兼容环境里构建；
 在较新的发行版上直接编译会引用更高的 glibc 符号版本。

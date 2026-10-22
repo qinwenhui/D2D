@@ -33,8 +33,8 @@ homepage = "https://github.com/qinwenhui/D2D"
 readme = "README.md"
 keywords = ["database", "migration", "etl", "arrow", "data-transfer"]
 categories = ["database", "command-line-utilities"]
-# Arrow 60 要求 1.88（53 只要求 1.70）。基准机是 Rust 1.99。
-rust-version = "1.88"
+# Arrow 60 要求 1.88（53 只要求 1.70）；uuid 1.28 要求 1.89，所以基线取 1.89。
+rust-version = "1.89"
 
 [workspace.dependencies]
 # Arrow。只声明这一个 —— 它已经把 arrow-array / arrow-schema / arrow-ipc /

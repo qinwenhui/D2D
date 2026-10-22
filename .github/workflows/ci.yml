@@ -38,7 +38,7 @@ jobs:
       # 链接期就需要 unixODBC，哪怕本次任务不用 odbc method。
       - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev pkg-config libssl-dev
       # 需要真库的集成测试都是 #[ignore]，CI 里不会连外部服务。
       - name: Build
         run: cargo build --workspace --all-targets --locked
@@ -56,21 +56,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: lint
+      # reqwest 在 Linux 上默认走 native-tls，openssl-sys 的 build script 需要它
+      - name: Install Linux build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev unixodbc-dev
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   msrv:
-    name: MSRV 1.88
+    name: MSRV 1.89
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
-      # `cargo check` 不链接，不需要 unixODBC
+      - name: Install Linux build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      # `cargo check` 不链接最终产物，不需要 unixODBC
       - name: cargo check
         run: cargo check --workspace --locked
 
@@ -83,7 +88,7 @@ jobs:
     timeout-minutes: 30
     env:
       # 固定编译器版本，避免 stable 漂移影响发布产物
-      RUST_VERSION: 1.88.0
+      RUST_VERSION: 1.89.0
       # 想彻底钉死可改成 image@sha256:<digest>（首次跑完后
       # `docker inspect --format '{{index .RepoDigests 0}}' <image>` 可取）
       IMAGE: quay.io/pypa/manylinux2014_x86_64
@@ -103,7 +108,9 @@ jobs:
             -e RUST_VERSION="$RUST_VERSION" \
             "$IMAGE" \
             bash -ec '
-              yum install -y unixODBC-devel curl
+              # aws-lc-sys 需要 cmake；EPEL 提供的是 cmake3
+              yum install -y unixODBC-devel openssl-devel curl cmake3
+              command -v cmake >/dev/null || ln -sf /usr/bin/cmake3 /usr/local/bin/cmake
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
               . "$HOME/.cargo/env"
