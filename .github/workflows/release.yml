@@ -44,7 +44,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" dist/* \
+          set +e
+          out=$(gh release create "$TAG" \
+            dist/*.tar.gz dist/checksums.sha256 \
             --verify-tag \
             --title "D2D $TAG" \
-            --generate-notes
+            --generate-notes 2>&1)
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            msg=$(printf '%s' "$out" \
+              | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/%/%25/g' \
+              | tr '\n' '|')
+            printf '::error title=gh release create failed::%s\n' "$msg"
+          fi
+          exit "$rc"

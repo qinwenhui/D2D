@@ -80,10 +80,14 @@ jobs:
           cp README.md LICENSE LICENSE-MIT LICENSE-APACHE "dist/${pkg}/"
           cp examples/*.yaml "dist/${pkg}/examples/"
           tar -czf "dist/${pkg}.tar.gz" -C dist "${pkg}"
+          rm -rf "dist/${pkg}"
           (cd dist && sha256sum ./*.tar.gz > checksums.sha256)
           ls -l dist
       - uses: actions/upload-artifact@v4
         with:
           name: d2d-linux-x86_64-glibc217
-          path: dist/
+          # 只传文件：目录留在 artifact 里会让 gh release create 报错
+          path: |
+            dist/*.tar.gz
+            dist/checksums.sha256
           if-no-files-found: error
