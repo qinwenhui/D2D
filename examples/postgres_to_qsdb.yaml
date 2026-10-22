@@ -1,23 +1,29 @@
-# D2D Job 配置: PostgreSQL t_src → QSDB dst_big（嵌入式、Arrow 直写）
-# 用法: PG_USER=postgres PG_PASS=... d2d --config examples/postgres_to_qsdb.yaml [--dry-run]
+# D2D Job 配置: PostgreSQL t_src → QSDB（HTTP 服务模式）
+# 用法: PG_USER=... PG_PASS=... d2d --config examples/postgres_to_qsdb_http.yaml [--dry-run]
 #
-# QSDB 是嵌入式列式库：D2D 直接打开 connection.path 指向的**数据目录**，
-# 写入就是 `Qsdb::append(RecordBatch)`，没有 INSERT 拼装、没有文本编解码。
-# 前提：D2D 与 QSDB 的数据目录在**同一台机器**上可见。
+# QSDB 统一以 server 模式部署：
+#   qsdb server --path /var/lib/qsdb --addr 0.0.0.0:9430
+# 然后 D2D 通过官方 qsdb-client 走 HTTP：
+#   写 = Arrow IPC POST /api/v1/write（服务端 Qsdb::append）
+#   读 = query_stream（rows 通道，客户端内存恒定）
 #
-# 若 QSDB 是常驻的 `qsdb server`，把 sink 改成 HTTP 模式即可：
-#   method: "http"
-#   connection: { url: "http://192.0.2.5:9430", user: "...", password: "..." }
-# 见 examples/mysql_to_qsdb_http.yaml。
+# ⚠️ qsdb-client 不做 TLS：只接受 http://host:port。要加密请在 QSDB 前挂 TLS 终止代理。
+# ⚠️ 进程内 embedded 模式（connection.path）已移除；配了会明确报错。
 
 job:
-  name: "postgres_to_qsdb"
+  name: "postgres_to_qsdb_http"
 
 flow:
   source:
-    concurrency: 1          # QSDB 写入端不需要多分片；源端仍可用 PostgreSQL range 分片
+    concurrency: 4
+    pool:
+      capacity: 64MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 4
   sink:
     concurrency: 4
+    # 一份数据 = 一次 HTTP /write 请求 = 一次 QSDB 提交
     batch_bytes: 64MB
     batch_rows: 65536
     pool:
@@ -31,7 +37,7 @@ source:
     port: 5432
     user: "${PG_USER}"
     password: "${PG_PASS}"
-  schema_name: "postgres"   # PostgreSQL 的 database 名
+  schema_name: "postgres"   # ⚠️ PostgreSQL 里这里装的是**数据库名**
   table: "src_big"
   partition:
     mode: "range"
@@ -42,18 +48,22 @@ source:
 
 sink:
   connector: "qsdb"
+  method: "http"                  # 可省略；只给 url 时自动选 http
   connection:
-    path: "/data/qsdb"      # QSDB 数据目录（本地盘或挂载点）
-    cache_mb: 1024          # 可选：热数据缓存预算（MB）；缺省用 QSDB 自己的 256MB
-  database: "default"       # QSDB 嵌入式写 API 目前只支持 default 库
+    url: "http://192.0.2.20:9430"
+    # Basic 认证（与 token 二选一）
+    # user: "qsdb_user"
+    # password: "qsdb_pass"
+    # 或 Bearer（服务端 --token / auth/login 签发）
+    # token: "eyJ..."
+    connect_timeout_ms: 10000
+    query_timeout_ms: 0           # 0/缺省 = 不设服务端超时
+  database: "default"             # qsdb server 是单库服务，只能 default
   table: "dst_big"
   properties:
-    # 表不存在时按首批数据的 Arrow schema 自动建表（缺省 true）
-    create_table: true
-    # 可选：QSDB 原生分区（按源数据的列路由；列名必须出现在批次里）
-    # partition_by: ["dt"]
-    # 可选：zstd（缺省）| snappy
-    compression: "zstd"
+    create_table: true            # 表不存在时按首批 Arrow schema 自动建表
+    # partition_by: ["dt"]        # QSDB 原生分区（列必须出现在批次里）
+    compression: "zstd"           # zstd（缺省）| snappy
 
 engine:
   memory_mb: 2048
