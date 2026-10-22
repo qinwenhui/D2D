@@ -315,7 +315,15 @@ impl DpiLibrary {
         let svr = cstr(server, "DPI 服务器地址")?;
         let usr = cstr(user, "DPI 用户名")?;
         let p = cstr(pwd, "DPI 密码")?;
-        let rc = unsafe { (self.login)(con, svr.as_ptr(), usr.as_ptr(), p.as_ptr()) };
+        // 部分目标的 `c_char` 是 u8（如 aarch64 Linux），统一 cast 到达梦的 sdbyte*
+        let rc = unsafe {
+            (self.login)(
+                con,
+                svr.as_ptr().cast(),
+                usr.as_ptr().cast(),
+                p.as_ptr().cast(),
+            )
+        };
         if !succeeded(rc) {
             return Err(self.diag(DSQL_HANDLE_DBC, con, "dpi_login", rc));
         }
@@ -382,7 +390,7 @@ impl DpiLibrary {
 
     pub fn exec_direct(&self, stmt: DpiHandle, sql: &str) -> D2DResult<()> {
         let s = cstr(sql, "DPI SQL")?;
-        let rc = unsafe { (self.exec_direct)(stmt, s.as_ptr()) };
+        let rc = unsafe { (self.exec_direct)(stmt, s.as_ptr().cast()) };
         if !succeeded(rc) {
             return Err(self.diag(DSQL_HANDLE_STMT, stmt, "dpi_exec_direct", rc));
         }
@@ -535,7 +543,7 @@ impl DpiLibrary {
     /// `dpi_prepare`：绑定参数前必须先准备语句
     pub fn prepare(&self, stmt: DpiHandle, sql: &str) -> D2DResult<()> {
         let s = cstr(sql, "DPI SQL")?;
-        let rc = unsafe { (self.prepare)(stmt, s.as_ptr()) };
+        let rc = unsafe { (self.prepare)(stmt, s.as_ptr().cast()) };
         if !succeeded(rc) {
             return Err(self.diag_write(DSQL_HANDLE_STMT, stmt, "dpi_prepare", rc));
         }
