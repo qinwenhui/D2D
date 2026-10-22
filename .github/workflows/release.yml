@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # 允许对已存在的 tag 补发 Release（工作流本身永远取自 main）
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的已存在 tag，例如 v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    name: build / linux-x86_64 (glibc 2.17)
+    uses: ./.github/workflows/build-linux-glibc217.yml
+    with:
+      ref: ${{ inputs.tag || '' }}
+
+  publish:
+    name: publish release
+    needs: build-linux-x86_64
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: d2d-linux-x86_64-glibc217
+          path: dist
+      - name: Show artifacts
+        run: ls -l dist
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --verify-tag \
+            --title "D2D $TAG" \
+            --generate-notes

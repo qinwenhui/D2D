@@ -1,0 +1,86 @@
+name: build-linux-glibc217
+
+# 发布产物与 CI 复用同一份构建定义，避免“CI 跑的是 A、发版跑的是 B”。
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "要构建的 git ref；留空则用触发本次 workflow 的 ref"
+        type: string
+        required: false
+        default: ""
+
+env:
+  # 固定编译器版本，避免 stable 漂移影响发布产物
+  RUST_VERSION: 1.89.0
+  # 想彻底钉死可改成 image@sha256:<digest>（首次跑完后
+  # `docker inspect --format '{{index .RepoDigests 0}}' <image>` 可取）
+  IMAGE: quay.io/pypa/manylinux2014_x86_64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Pull build image
+        run: |
+          for i in 1 2 3; do
+            docker pull "$IMAGE" && exit 0
+            echo "pull failed (attempt $i), retrying..."
+            sleep 15
+          done
+          exit 1
+      - name: Build in CentOS 7-compatible image
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD":/src -w /src \
+            -e RUST_VERSION="$RUST_VERSION" \
+            "$IMAGE" \
+            bash -ec '
+              # aws-lc-sys 需要 cmake；EPEL 提供的是 cmake3
+              yum install -y unixODBC-devel curl cmake3
+              command -v cmake >/dev/null || ln -sf /usr/bin/cmake3 /usr/local/bin/cmake
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+              . "$HOME/.cargo/env"
+              cargo build --release --locked -p d2d-cli
+            ' 2>&1 | tee build.log
+      - name: Report failure
+        if: failure()
+        run: |
+          if [ -f build.log ]; then
+            msg=$(tail -n 40 build.log \
+              | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\r//g' -e 's/%/%25/g' \
+              | tr '\n' '|')
+            printf '::error title=Build failure::%s\n' "$msg"
+          fi
+      # 容器里是 root，target/ 归 root 所有；交还给 runner 用户
+      - name: Fix workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" target
+      - name: Verify glibc symbol versions
+        run: |
+          file target/release/d2d
+          max=$(objdump -T target/release/d2d \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+          echo "max required glibc: ${max:-none}"
+          if [ "$(printf '%s\n' GLIBC_2.17 "$max" | sort -V | tail -1)" != "GLIBC_2.17" ]; then
+            echo "::error::binary requires ${max}, newer than GLIBC_2.17"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"] == "d2d-cli"))')
+          mkdir -p dist
+          tar -czf "dist/d2d-${version}-linux-x86_64-glibc217.tar.gz" \
+            -C target/release d2d
+          (cd dist && sha256sum ./*.tar.gz > checksums.sha256)
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d2d-linux-x86_64-glibc217
+          path: dist/
+          if-no-files-found: error
