@@ -98,5 +98,11 @@ jobs:
   # 这个 job 平时就跟着 main / PR 跑，不要只在打 tag 时才第一次执行。
   # 构建定义与 release.yml 共用 build-linux-glibc217.yml。
   centos7:
-    name: build / centos7 (glibc 2.17)
+    name: build / centos7 (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     uses: ./.github/workflows/build-linux-glibc217.yml
+    with:
+      arch: ${{ matrix.arch }}

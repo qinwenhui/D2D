@@ -3,26 +3,69 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # 允许对已存在的 tag 补发 Release（工作流本身永远取自 main）
+  # 允许对已存在的 tag 补发/补全 Release（工作流本身永远取自 main）
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的已存在 tag，例如 v0.1.0"
+        description: "要发布的已存在 tag，例如 v0.1.2"
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  build-linux-x86_64:
-    name: build / linux-x86_64 (glibc 2.17)
+  linux:
+    name: linux / ${{ matrix.arch }} (glibc 2.17)
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     uses: ./.github/workflows/build-linux-glibc217.yml
     with:
       ref: ${{ github.event.inputs.tag || '' }}
+      arch: ${{ matrix.arch }}
+
+  windows:
+    name: windows / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x86_64
+          - os: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Build
+        run: cargo build --release --locked -p d2d-cli
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq 'd2d-cli' } |
+            Select-Object -ExpandProperty version
+          $pkg = "d2d-$version-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path "dist/$pkg/examples" | Out-Null
+          Copy-Item "target/release/d2d.exe" "dist/$pkg/"
+          Copy-Item README.md, LICENSE, LICENSE-MIT, LICENSE-APACHE "dist/$pkg/"
+          Copy-Item "examples/*.yaml" "dist/$pkg/examples/"
+          Compress-Archive -Path "dist/$pkg" -DestinationPath "dist/$pkg.zip" -Force
+          Remove-Item -Recurse -Force "dist/$pkg"
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d2d-windows-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
 
   publish:
     name: publish release
-    needs: build-linux-x86_64
+    needs: [linux, windows]
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -36,25 +79,32 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: d2d-linux-x86_64-glibc217
           path: dist
-      - name: Show artifacts
-        run: ls -l dist
-      - name: Create GitHub Release
+          pattern: d2d-*
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > checksums.sha256
+          ls -l
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set +e
-          out=$(gh release create "$TAG" \
-            dist/*.tar.gz dist/checksums.sha256 \
-            --verify-tag \
-            --title "D2D $TAG" \
-            --generate-notes 2>&1)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            out=$(gh release upload "$TAG" dist/* --clobber 2>&1)
+          else
+            out=$(gh release create "$TAG" dist/* \
+              --verify-tag \
+              --title "D2D $TAG" \
+              --generate-notes 2>&1)
+          fi
           rc=$?
           if [ "$rc" -ne 0 ]; then
             msg=$(printf '%s' "$out" \
               | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/%/%25/g' \
               | tr '\n' '|')
-            printf '::error title=gh release create failed::%s\n' "$msg"
+            printf '::error title=gh release failed::%s\n' "$msg"
           fi
           exit "$rc"

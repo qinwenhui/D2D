@@ -9,18 +9,23 @@ on:
         type: string
         required: false
         default: ""
+      arch:
+        description: "x86_64 | aarch64"
+        type: string
+        required: false
+        default: "x86_64"
 
 env:
   # 固定编译器版本，避免 stable 漂移影响发布产物
   RUST_VERSION: 1.89.0
-  # 想彻底钉死可改成 image@sha256:<digest>（首次跑完后
-  # `docker inspect --format '{{index .RepoDigests 0}}' <image>` 可取）
-  IMAGE: quay.io/pypa/manylinux2014_x86_64
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 30
+    env:
+      ARCH: ${{ inputs.arch }}
+      IMAGE: ${{ inputs.arch == 'aarch64' && 'quay.io/pypa/manylinux2014_aarch64' || 'quay.io/pypa/manylinux2014_x86_64' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,20 +79,16 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"] == "d2d-cli"))')
-          pkg="d2d-${version}-linux-x86_64-glibc217"
+          pkg="d2d-${version}-linux-${ARCH}-glibc217"
           mkdir -p "dist/${pkg}/examples"
           cp target/release/d2d "dist/${pkg}/"
           cp README.md LICENSE LICENSE-MIT LICENSE-APACHE "dist/${pkg}/"
           cp examples/*.yaml "dist/${pkg}/examples/"
           tar -czf "dist/${pkg}.tar.gz" -C dist "${pkg}"
           rm -rf "dist/${pkg}"
-          (cd dist && sha256sum ./*.tar.gz > checksums.sha256)
           ls -l dist
       - uses: actions/upload-artifact@v4
         with:
-          name: d2d-linux-x86_64-glibc217
-          # 只传文件：目录留在 artifact 里会让 gh release create 报错
-          path: |
-            dist/*.tar.gz
-            dist/checksums.sha256
+          name: d2d-linux-${{ inputs.arch }}-glibc217
+          path: dist/*.tar.gz
           if-no-files-found: error
