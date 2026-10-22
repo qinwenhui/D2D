@@ -57,7 +57,9 @@ jobs:
         run: |
           for f in build.log test.log; do
             if [ -f "$f" ]; then
-              msg=$(tail -n 60 "$f" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/')
+              msg=$(tail -n 40 "$f" \
+                | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\r//g' -e 's/%/%25/g' \
+                | tr '\n' '|')
               printf '::error title=Failure in %s::%s\n' "$f" "$msg"
             fi
           done
@@ -138,7 +140,9 @@ jobs:
         if: failure()
         run: |
           if [ -f build.log ]; then
-            msg=$(tail -n 60 build.log | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/')
+            msg=$(tail -n 40 build.log \
+              | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\r//g' -e 's/%/%25/g' \
+              | tr '\n' '|')
             printf '::error title=Build failure::%s\n' "$msg"
           fi
       # 容器里是 root，target/ 归 root 所有；交还给 runner 用户
