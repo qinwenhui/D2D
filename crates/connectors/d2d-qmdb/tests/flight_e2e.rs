@@ -247,3 +247,88 @@ async fn bad_password_fails_loud() {
         .to_string();
     assert!(e.contains("认证失败"), "{e}");
 }
+
+/// **列乱序按列名对齐**（服务端修复后的行为回归）
+///
+/// qmdb 服务端装载曾按自己的表 schema **盲解**客户端 IPC 批次：多余列被静默剥掉、
+/// 同宽类型乱序会**静默错位**（int64 的值进 double 列的位置 —— 不是丢，是污染）。
+/// 修复后按列名对齐 + 未知列拒绝 + 安全强转。这里验证 D2D 侧的组合行为：
+/// 批次列序与目标表不同，值必须按**列名**落位（本连接器的首批校验本就是按名的，
+/// 不会挡乱序批次）。
+#[tokio::test]
+#[ignore = "requires a running qmdb server; set QMDB_FLIGHT_ADDR / QMDB_FLIGHT_USER / QMDB_FLIGHT_PASS"]
+async fn out_of_order_columns_align_by_name() {
+    let flight = raw_client().await;
+    let table = table_name();
+    flight
+        .query(&format!(
+            "CREATE TABLE {table} (id BIGINT, name VARCHAR, amount DECIMAL(9,2))"
+        ))
+        .await
+        .unwrap();
+
+    // 批次列序 = (amount, name, id)，与目标表 (id, name, amount) 刻意相反；
+    // 类型各异（DECIMAL/UTF8/INT64），如果服务端按位置摆就会炸或错位
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("amount", DataType::Decimal128(9, 2), true),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("id", DataType::Int64, false),
+    ]));
+    let shuffled = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(
+                Decimal128Array::from(vec![Some(150i128), Some(-25)])
+                    .with_precision_and_scale(9, 2)
+                    .unwrap(),
+            ), // 1.50 / -0.25
+            Arc::new(StringArray::from(vec![Some("甲"), Some("乙")])),
+            Arc::new(Int64Array::from(vec![7i64, 8])),
+        ],
+    )
+    .unwrap();
+
+    let sink_spec: SinkSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "database": "bench_lc",
+        "table": table.rsplit_once('.').unwrap().1,
+    }))
+    .unwrap();
+    let mut sink = QmdbSinkConnector::new();
+    sink.init(&sink_spec).await.unwrap();
+    let mut session = sink.begin_session(&sink_spec).await.unwrap();
+    assert_eq!(session.write_batch(shuffled).await.unwrap(), 2);
+    session.commit().await.unwrap();
+
+    // 逐行核对：值跟着**列名**走，不跟位置走
+    let (name7, amount7) = point_lookup(&flight, &table, 7).await;
+    assert_eq!(name7.as_deref(), Some("甲"), "name 值错位了");
+    assert_eq!(amount7, Some(150i128), "amount 值错位了（1.50）");
+    let (name8, amount8) = point_lookup(&flight, &table, 8).await;
+    assert_eq!(name8.as_deref(), Some("乙"));
+    assert_eq!(amount8, Some(-25i128), "amount 值错位了（-0.25）");
+
+    // 未知列（目标表没有的列）现在服务端会拒绝 —— 客户端首批校验先拦，
+    // 这里直接绕过连接器用底层协议验证服务端兜底
+    let ghost_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("ghost", DataType::Utf8, true),
+    ]));
+    let ghost = RecordBatch::try_new(
+        ghost_schema,
+        vec![
+            Arc::new(Int64Array::from(vec![9i64])),
+            Arc::new(StringArray::from(vec![Some("boo")])),
+        ],
+    )
+    .unwrap();
+    let stats = flight
+        .load_table(&table, vec![ghost], &d2d_qmdb::LoadMode::Append, None)
+        .await;
+    let err = stats.expect_err("未知列必须被服务端拒绝（静默丢弃的时代结束了）");
+    let msg = err.to_string();
+    assert!(msg.contains("ghost") || msg.contains("未知列"), "{msg}");
+
+    flight.query(&format!("DROP TABLE {table}")).await.unwrap();
+}

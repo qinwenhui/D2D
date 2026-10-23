@@ -157,8 +157,11 @@ impl QmdbFlight {
 
     /// 目标表 schema：`SELECT * FROM t LIMIT 0` 的 FlightInfo 直接解 schema
     ///
-    /// 不走 DoGet：空结果的服务端连 IPC Schema 首包都不发（实测 .13），
-    /// 而 `FlightInfo.schema` 本身就是 IPC 编码的 Schema —— 一次往返、零批数据。
+    /// 为什么不从 DoGet 流里拿：`FlightRecordBatchStream::schema()` 要等**首次 poll
+    /// 之后**才从 None 变 Some（schema 消息在流内部被消费；qmdb 方用 pyarrow 探针
+    /// 确认服务端确实发了，是客户端观察时机的差异）。而 `FlightInfo.schema` 本身
+    /// 就是 IPC 编码的 Schema —— 一次往返、零批数据、不依赖 poll 时序。
+    /// 这也是 qmdb 协议文档 §1 的推荐做法（schema 两来源之一）。
     pub async fn table_schema(&self, qualified_table: &str) -> D2DResult<SchemaRef> {
         let sql = format!("SELECT * FROM {qualified_table} LIMIT 0");
         let info = self.flight_info(&sql).await?;
