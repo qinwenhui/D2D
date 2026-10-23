@@ -1,0 +1,30 @@
+[package]
+name = "d2d-qmdb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+d2d-core = { workspace = true }
+d2d-connector = { workspace = true }
+# src/types.rs 的类型适配器要实现 d2d_types::TypeAdapter
+d2d-types = { workspace = true }
+arrow = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+# qmdb 的数据面是 Arrow Flight SQL（gRPC）：与 doris 的 flight 读路径同一套依赖。
+# 不引 qmdb-client：它锁在服务端 DataFusion 的 arrow 59 上，而内核全线 arrow 60；
+# 线格式（gRPC + Arrow IPC）跨 arrow 版本稳定，这里用 arrow 60 直连。
+arrow-flight = { workspace = true }
+tonic = { workspace = true }
+# FlightSQL 命令要 pack 进 google.protobuf.Any（`Any::encode_to_vec` 的 trait 在这）
+prost = "0.14"
+# MIN/MAX 探测要把 Arrow 的 Date32/Timestamp 渲染成 SQL 字面量
+chrono = { workspace = true }
+
+[dev-dependencies]

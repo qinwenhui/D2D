@@ -301,10 +301,12 @@ mod tests {
             "DM_PASS",
             "DORIS_USER",
             "DORIS_PASS",
+            "DORIS_FE",
             "MYSQL_USER",
             "MYSQL_PASS",
             "PG_USER",
             "PG_PASS",
+            "QMDB_PASS",
         ] {
             std::env::set_var(k, "dummy");
         }

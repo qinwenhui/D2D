@@ -1,0 +1,74 @@
+# D2D Job 配置: Doris → qmdb（Flight SQL 三段式装载）
+# 用法: DMFE=... d2d --config examples/doris_to_qmdb.yaml [--dry-run]
+#
+# 目标端 qmdb 的批量写入走三段式装载（与 JDBC/Python/Rust 官方客户端同一协议）：
+#   begin_load（领 load_id）→ do_put（Arrow 批直灌）→ commit_load（拿摘要）
+# 任意阶段失败自动 abort，不留半截数据。
+#
+# 写入模式（sink.properties.load.mode）：
+#   append                追加（缺省）
+#   overwrite_partitions  覆盖命中的分区（配 load.partitions 谓词；重跑同一分区即幂等）
+#   overwrite_table       整表替换
+#
+# ⚠️ qmdb 装载协议没有幂等令牌，失败重试会重复数据 —— 失败就大声失败，
+#    恢复姿势 = overwrite_partitions 圈范围重跑。
+
+job:
+  name: "doris_to_qmdb"
+
+flow:
+  source:
+    concurrency: 8
+    pool:
+      capacity: 256MB
+      on_overflow: backpressure
+  pipeline:
+    concurrency: 8
+  sink:
+    concurrency: 8
+    # 一份数据 = 一次三段式装载；出站会按 8192 行零拷贝切片（服务端建议值）
+    batch_bytes: 64MB
+    batch_rows: 250000
+    pool:
+      capacity: 512MB
+      on_overflow: backpressure
+
+source:
+  connector: "doris"
+  method: "flight"                    # Arrow Flight SQL 读（列式直传）
+  connection:
+    fe_hosts:
+      - "${DORIS_FE}:19030"
+    username: "root"
+    password: "${DORIS_PASS}"
+    flight_port: 8070
+  schema_name: "demo_db"
+  table: "src_big"
+  partition:
+    mode: "range"
+    column: "pdate"
+    count: 8
+    lower: "2026-10-01"
+    upper: "2026-10-09"
+
+sink:
+  connector: "qmdb"
+  connection:
+    addr: "192.0.2.13:31337"          # Flight SQL 端点（host:port 必填）
+    user: "root"
+    password: "${QMDB_PASS}"
+    connect_timeout_ms: 5000
+  database: "bench_lc"                # qmdb 的库名
+  table: "dst_big"
+  properties:
+    load:
+      mode: "overwrite_partitions"    # 重跑同一分区先覆盖旧文件（幂等）
+      partitions:
+        # 装载谓词语法（qmdb 协议）：col = 'v' / col IN ('a','b') / col BETWEEN 'a' AND 'b'
+        - "pdate BETWEEN '2026-10-01' AND '2026-10-08'"
+      # watermark:                    # 可选：commit 时登记水位（SHOW WATERMARKS 可查）
+      #   name: daily
+      #   value: "2026-10-08"
+
+engine:
+  memory_mb: 4096

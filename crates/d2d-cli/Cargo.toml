@@ -21,6 +21,7 @@ d2d-doris = { workspace = true }
 d2d-mysql = { workspace = true }
 d2d-postgres = { workspace = true }
 d2d-qsdb = { workspace = true }
+d2d-qmdb = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

@@ -56,6 +56,7 @@ source  ──► [source_pool] ──► pipeline ──► [sink_pool] ──�
 | `doris` | ✓ | ✓ | 读：`mysql`（缺省）/ `flight`；写：Stream Load |
 | `mysql` | ✓ | ✓ | MySQL 协议 |
 | `postgres` | ✓ | ✓ | PostgreSQL 协议 |
+| `qmdb` | ✓ | ✓ | Arrow Flight SQL（读列式直传；写三段式装载） |
 | `qsdb` | ✓ | ✓ | HTTP（`qsdb server`） |
 
 运行机上的额外依赖：
@@ -71,6 +72,9 @@ source  ──► [source_pool] ──► pipeline ──► [sink_pool] ──�
 > QSDB 统一以 **server 模式**运行：先启动 `qsdb server`，再在 `connection.url` 里填
 > `http://host:port`。连接器通过官方 `qsdb-client` 读写（写走 Arrow IPC），
 > 不支持进程内 embedded 模式。
+>
+> qmdb 走 **Arrow Flight SQL 数据面**（与 qmdb 的 JDBC/官方客户端同一条服务端路径），
+> 纯 gRPC + Arrow，无额外原生依赖；qmdb 端点缺省端口 `31337`。
 
 ## 安装
 
@@ -585,6 +589,53 @@ sink:
 - 服务是单库的，`database` / `schema_name` 只能是 `default`。
 - `connection.path`、`cache_mb` 等 embedded 配置已移除，配了会明确报错。
 
+### qmdb
+
+```yaml
+source:
+  connector: qmdb
+  connection:
+    addr: "192.0.2.13:31337"          # Flight SQL 端点（host:port 必填）
+    user: "${QMDB_USER}"
+    password: "${QMDB_PASS}"
+  schema_name: "bench_lc"             # qmdb 的库名（qmdb 是多库的，表名一律全限定）
+  table: dwd_wide_gen
+  partition:                          # 按 qmdb 分区列切，触发服务端分区裁剪
+    mode: "range"
+    column: "pdate"
+    count: 8
+    lower: "2026-10-01"
+    upper: "2026-10-09"
+
+sink:
+  connector: qmdb
+  connection:
+    addr: "192.0.2.13:31337"
+    user: "${QMDB_USER}"
+    password: "${QMDB_PASS}"
+  database: "bench_lc"
+  table: dst_big
+  properties:
+    load:
+      mode: "overwrite_partitions"    # append（缺省）| overwrite_partitions | overwrite_table
+      partitions:                     # mode=overwrite_partitions 时的分区谓词
+        - "pdate BETWEEN '2026-10-01' AND '2026-10-08'"
+```
+
+- 数据面是 **Arrow Flight SQL**（与 qmdb 的 JDBC/官方客户端同一条服务端路径）；
+  读=列式直传（无行解析），写=三段式装载 `begin_load → do_put → commit_load`，
+  任意阶段失败自动 abort，不留半截数据。
+- 连接器用 arrow 60 原生直连（qmdb 的线格式跨 arrow 版本稳定），无额外原生依赖。
+- **写入不自动重试**：装载协议没有幂等令牌，commit 响应丢失后重试就是重复数据。
+  失败恢复姿势 = `load.mode: overwrite_partitions` 圈范围重跑（先覆盖旧文件，幂等）。
+- 分区切法支持 `list` / `range` / `none`；`hash` 不支持（qmdb 的 SQL 面没有稳定的
+  行哈希函数，规划期会直接报错）。
+- `partition.mode: range` 缺边界时会自动做一次 `MIN/MAX` 探测（qmdb 的聚合点查很便宜）。
+- 会话首批写入前会做**列对齐校验**：批次里目标表没有的列会报错（服务端对不上的
+  列是静默丢弃的）；目标表多出来的列会警告（服务端按 DEFAULT/NULL 兜底）。
+- 认证 = 每个 RPC 的 `authorization: Bearer user:password` 头；服务端连续失败 10 次
+  会锁来源 IP 300s —— 密码没改对之前不要反复重试。
+
 ## 部署到 CentOS 7
 
 发布产物在 CentOS 7 兼容环境（glibc 2.17）里构建，并做 GLIBC 符号版本断言。
@@ -612,6 +663,7 @@ odbcinst -q -d
 - `libdmdpi.so` / `dmfldr` 都是达梦客户端的一部分，本仓库不随包分发；
   分发前请自行确认达梦 SDK 的许可条款（见 `crates/connectors/d2d-dameng/NOTICE-dpi.md`）。
 - QSDB 通过 HTTP 连接，不需要本地客户端库。
+- qmdb 通过 gRPC（Flight SQL）连接，不需要本地客户端库。
 
 ## 排错
 
@@ -622,6 +674,10 @@ odbcinst -q -d
 | 加载 DPI 动态库失败，但文件存在 | `libdmdpi.so` 还依赖同目录的达梦库。把 `$DM_HOME/bin` 和 `drivers_odbc` 加进 `LD_LIBRARY_PATH` |
 | `找不到 DPI 动态库` | 配 `properties.dpi.library` 绝对路径，或把目录加进 `LD_LIBRARY_PATH` |
 | 配置报 `qsdb 现在只支持 server 模式` | 删掉 `connection.path` / `cache_mb`，改用 `connection.url` |
+| qmdb 报 `认证失败` | 账号/密码错。注意连续失败 10 次会锁来源 IP 300s，改对密码后等锁过期 |
+| qmdb 报 `批次里的列 ... 在目标表上不存在` | 批次列与目标表名对不上（qmdb 按列名对齐、大小写无关）。用 transform 投影对齐，或改目标表列名 |
+| qmdb 报 `不支持 partition.mode: hash` | qmdb 的 SQL 面没有稳定的行哈希函数。改用 `list` / `range` |
+| qmdb 写入失败后重跑会重复？ | 不会自动重试；`append` 模式手动重跑会重复。用 `overwrite_partitions` 圈定范围重跑（幂等） |
 | Doris `no valid Basic authorization` | Stream Load 走了 FE 转发。显式配 `be_hosts` 直连 BE |
 | `json body size ... exceed ... streaming_load_json_max_mb` | JSON 请求体超过 BE 上限。调 `stream_load.max_request_bytes` 或改用 csv |
 | 任务失败：`对账失败` | 源端行数 ≠ 目标端确认行数。检查唯一键/去重、分区条件是否漏段 |

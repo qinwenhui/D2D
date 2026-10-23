@@ -1,0 +1,249 @@
+//! Flight SQL 数据面端到端（**需要运行中的 qmdb server**）
+//!
+//! ```text
+//! QMDB_FLIGHT_ADDR=192.0.2.13:31337 QMDB_FLIGHT_USER=root QMDB_FLIGHT_PASS=root \
+//!   cargo test -p d2d-qmdb --test flight_e2e -- --ignored
+//! ```
+//!
+//! 覆盖：三段式装载（sink 写入 → COUNT 对账）→ overwrite_table 幂等重跑 →
+//! Flight SQL source（LIMIT 下推读回）→ 清理。表名带 pid+纳秒，跑完即删。
+
+use arrow::array::Array as _;
+use arrow::array::{
+    BooleanArray, Date32Array, Decimal128Array, Int64Array, StringArray, TimestampMicrosecondArray,
+};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::record_batch::RecordBatch;
+use d2d_connector::{SinkConnector, SinkSpec, SourceConnector, SourceSpec};
+use d2d_qmdb::QmdbConnection;
+use d2d_qmdb::{QmdbFlight, QmdbSinkConnector, QmdbSourceConnector};
+use futures::StreamExt;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn conn_json() -> serde_json::Value {
+    serde_json::json!({
+        "addr": std::env::var("QMDB_FLIGHT_ADDR").expect("需要 QMDB_FLIGHT_ADDR，例如 192.0.2.13:31337"),
+        "user": std::env::var("QMDB_FLIGHT_USER").unwrap_or_else(|_| "root".into()),
+        "password": std::env::var("QMDB_FLIGHT_PASS").unwrap_or_else(|_| "root".into()),
+    })
+}
+
+/// 全类型覆盖的样本批（列名与 [`create_table`] 的 DDL 一致）
+fn sample_batch() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("amount", DataType::Decimal128(9, 2), true),
+        Field::new("flag", DataType::Boolean, true),
+        Field::new("pdate", DataType::Date32, true),
+        Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+            Arc::new(StringArray::from(vec![Some("a"), None, Some("中文值")])),
+            Arc::new(
+                Decimal128Array::from(vec![Some(123456i128), None, Some(-5)])
+                    .with_precision_and_scale(9, 2)
+                    .unwrap(),
+            ),
+            Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])),
+            Arc::new(Date32Array::from(vec![Some(20_747), Some(20_748), None])), // 2026-10-21/22
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                Some(1_792_571_400_000_000),
+                None,
+                Some(1_792_658_200_000_000),
+            ])),
+        ],
+    )
+    .unwrap()
+}
+
+async fn raw_client() -> QmdbFlight {
+    let conn = QmdbConnection::from_json(&conn_json()).unwrap();
+    QmdbFlight::connect(&conn).await.unwrap()
+}
+
+fn table_name() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("bench_lc.d2d_qmdb_e2e_{}_{}", std::process::id(), nanos)
+}
+
+/// 收全一个查询的结果行数
+async fn count(flight: &QmdbFlight, sql: &str) -> u64 {
+    let (_, batches) = flight.query(sql).await.unwrap();
+    batches
+        .first()
+        .map(|b| {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("COUNT 列应是 Int64");
+            col.value(0) as u64
+        })
+        .unwrap_or(0)
+}
+
+/// 点查一行：(name, amount)（NULL → None）
+async fn point_lookup(flight: &QmdbFlight, table: &str, id: i64) -> (Option<String>, Option<i128>) {
+    let (_, mut batches) = flight
+        .query(&format!("SELECT name, amount FROM {table} WHERE id = {id}"))
+        .await
+        .unwrap();
+    let b = batches.pop().expect("点查应有一行");
+    let name = b
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    let amount = b
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::Decimal128Array>()
+        .unwrap();
+    let n = if name.is_null(0) {
+        None
+    } else {
+        Some(name.value(0).to_string())
+    };
+    let a = if amount.is_null(0) {
+        None
+    } else {
+        Some(amount.value(0))
+    };
+    (n, a)
+}
+
+#[tokio::test]
+#[ignore = "requires a running qmdb server; set QMDB_FLIGHT_ADDR / QMDB_FLIGHT_USER / QMDB_FLIGHT_PASS"]
+async fn flight_sink_then_source_roundtrip() {
+    let flight = raw_client().await;
+    let table = table_name();
+    let created = flight
+        .query(&format!(
+            "CREATE TABLE {table} (\
+             id BIGINT, name VARCHAR, amount DECIMAL(9,2), flag BOOLEAN, \
+             pdate DATE, ts TIMESTAMP)"
+        ))
+        .await;
+    if let Err(e) = created {
+        let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+        panic!("建表失败（检查账号权限/DDL 语法）: {e}");
+    }
+
+    // ── 写：三段式装载 ──
+    let sink_spec: SinkSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "database": "bench_lc",
+        "table": table.rsplit_once('.').unwrap().1,
+    }))
+    .unwrap();
+    let mut sink = QmdbSinkConnector::new();
+    sink.init(&sink_spec).await.unwrap();
+    let mut session = sink.begin_session(&sink_spec).await.unwrap();
+    assert_eq!(session.write_batch(sample_batch()).await.unwrap(), 3);
+    session.commit().await.unwrap();
+
+    // 对账：COUNT 必须等于写入行数
+    assert_eq!(
+        count(&flight, &format!("SELECT COUNT(*) FROM {table}")).await,
+        3
+    );
+
+    // 幂等重跑：overwrite_table 再写同一批 → 行数不变（整表替换）
+    let sink_spec_overwrite: SinkSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "database": "bench_lc",
+        "table": table.rsplit_once('.').unwrap().1,
+        "properties": { "load": { "mode": "overwrite_table" } }
+    }))
+    .unwrap();
+    let mut sink2 = QmdbSinkConnector::new();
+    sink2.init(&sink_spec_overwrite).await.unwrap();
+    let mut s2 = sink2.begin_session(&sink_spec_overwrite).await.unwrap();
+    assert_eq!(s2.write_batch(sample_batch()).await.unwrap(), 3);
+    s2.commit().await.unwrap();
+    assert_eq!(
+        count(&flight, &format!("SELECT COUNT(*) FROM {table}")).await,
+        3,
+        "overwrite_table 应该整表替换，不是追加"
+    );
+
+    // 值抽查：中文/NULL/DECIMAL 没有被静默改写（逐行点查，最直白）
+    let (n1, a1) = point_lookup(&flight, &table, 1).await;
+    assert_eq!(n1.as_deref(), Some("a"));
+    assert_eq!(a1, Some(123456i128), "DECIMAL(9,2) 未定点值 1234.56");
+    let (n2, a2) = point_lookup(&flight, &table, 2).await;
+    assert_eq!(n2, None, "NULL 不该被写成空串或别的");
+    assert_eq!(a2, None);
+    let (n3, a3) = point_lookup(&flight, &table, 3).await;
+    assert_eq!(n3.as_deref(), Some("中文值"));
+    assert_eq!(a3, Some(-5i128));
+
+    // ── 读：Flight SQL source（LIMIT 下推） ──
+    let source_spec: SourceSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "schema_name": "bench_lc",
+        "table": table.rsplit_once('.').unwrap().1,
+        "query": { "limit": 2 },
+    }))
+    .unwrap();
+    let mut source = QmdbSourceConnector::new();
+    source.init(&source_spec).await.unwrap();
+    let schema = source.schema().await.unwrap();
+    assert_eq!(schema.fields().len(), 6, "LIMIT 0 探出的 schema 应有 6 列");
+
+    let splits = source.split(&source_spec).await.unwrap();
+    assert_eq!(splits.len(), 1, "没配 partition 时是单分片");
+    let mut stream = source.read(&splits[0]).await.unwrap();
+    let mut rows = 0usize;
+    while let Some(item) = stream.next().await {
+        rows += item.unwrap().num_rows();
+    }
+    assert_eq!(rows, 2, "LIMIT 2 下推后源端只交出 2 行");
+    assert_eq!(
+        source.exported_rows(),
+        Some(2),
+        "对账计数应与读到的行数一致"
+    );
+    source.close().await.unwrap();
+
+    // ── 清理 ──
+    drop(sink);
+    drop(session);
+    flight.query(&format!("DROP TABLE {table}")).await.unwrap();
+    assert!(
+        flight
+            .query(&format!("SELECT COUNT(*) FROM {table}"))
+            .await
+            .is_err(),
+        "表应该已经删掉（再查要报错）"
+    );
+}
+
+/// 认证失败要报出明确的"认证失败"（而不是笼统的传输错误）
+#[tokio::test]
+#[ignore = "requires a running qmdb server; set QMDB_FLIGHT_ADDR"]
+async fn bad_password_fails_loud() {
+    let addr = std::env::var("QMDB_FLIGHT_ADDR").expect("需要 QMDB_FLIGHT_ADDR");
+    let conn = QmdbConnection::from_json(&serde_json::json!({
+        "addr": addr, "user": "root", "password": "definitely-wrong"
+    }))
+    .unwrap();
+    let flight = QmdbFlight::connect(&conn).await.unwrap();
+    let e = flight
+        .query("SELECT 1")
+        .await
+        .expect_err("错误密码必须失败")
+        .to_string();
+    assert!(e.contains("认证失败"), "{e}");
+}

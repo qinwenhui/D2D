@@ -936,6 +936,7 @@ dependencies = [
  "d2d-execution",
  "d2d-mysql",
  "d2d-postgres",
+ "d2d-qmdb",
  "d2d-qsdb",
  "d2d-transform",
  "d2d-types",
@@ -1088,6 +1089,26 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "d2d-qmdb"
+version = "0.1.2"
+dependencies = [
+ "arrow",
+ "arrow-flight",
+ "async-trait",
+ "chrono",
+ "d2d-connector",
+ "d2d-core",
+ "d2d-types",
+ "futures",
+ "prost",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
 ]
 

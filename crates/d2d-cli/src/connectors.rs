@@ -33,6 +33,7 @@ pub fn register_all(reg: &ConnectorRegistry) {
     d2d_mysql::register(reg);
     d2d_postgres::register(reg);
     d2d_qsdb::register(reg);
+    d2d_qmdb::register(reg);
     info!("已注册的连接器：{}", reg.describe());
 }
 
@@ -47,17 +48,18 @@ mod tests {
         register_all(&reg);
         // 达梦两个方向都在：reader（source/）与 writer（sink/）
         // Doris 现在也两个方向都在：读走 FE 的 MySQL 协议口（source/），写走 Stream Load（sink/）
+        // qmdb 两个方向都在：读/写都是 Arrow Flight SQL 数据面
         assert_eq!(
             reg.list_sources(),
-            vec!["dameng", "doris", "mysql", "postgres", "qsdb"]
+            vec!["dameng", "doris", "mysql", "postgres", "qmdb", "qsdb"]
         );
         assert_eq!(
             reg.list_sinks(),
-            vec!["dameng", "doris", "mysql", "postgres", "qsdb"]
+            vec!["dameng", "doris", "mysql", "postgres", "qmdb", "qsdb"]
         );
         assert_eq!(
             reg.list_type_adapters(),
-            vec!["dameng", "doris", "mysql", "postgres", "qsdb"]
+            vec!["dameng", "doris", "mysql", "postgres", "qmdb", "qsdb"]
         );
     }
 

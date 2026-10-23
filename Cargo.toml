@@ -17,6 +17,7 @@ members = [
     "crates/connectors/d2d-mysql",
     "crates/connectors/d2d-postgres",
     "crates/connectors/d2d-qsdb",
+    "crates/connectors/d2d-qmdb",
     # ── 入口 ──
     "crates/d2d-cli",
 ]
@@ -113,6 +114,7 @@ d2d-doris = { path = "crates/connectors/d2d-doris" }
 d2d-mysql = { path = "crates/connectors/d2d-mysql" }
 d2d-postgres = { path = "crates/connectors/d2d-postgres" }
 d2d-qsdb = { path = "crates/connectors/d2d-qsdb" }
+d2d-qmdb = { path = "crates/connectors/d2d-qmdb" }
 # QSDB 只走官方 HTTP 客户端（crates.io，MIT）。embedded 用的 `qsdb` crate
 # 没有发布，公开分支无法自包含，因此不再引入。
 qsdb-client = { version = "0.1.0", features = ["ipc"] }
