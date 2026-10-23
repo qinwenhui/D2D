@@ -12,9 +12,10 @@
 //! `GetFlightInfo + DoGet`；qmdb 的快照一致性由 ticket 内的 sn 保证
 //! （同 ticket 重复 DoGet 读到同一数据视图），并发分片读各自独立。
 //!
-//! range 分片缺边界时做一次 `MIN/MAX` 探测 —— 聚合在服务端做，配合分区
-//! 裁剪是一次便宜的往返（与 doris flight 的"必须显式给边界"不同：
-//! qmdb 的聚合点查就是为这种用法设计的）。
+//! range 分片缺边界时的探测分两级：优先 `SHOW PARTITIONS` 拿**真实分区值**当
+//! 切点（每段与存储分区精确对齐，qmdb 的分区裁剪每段都吃满）；列不是分区列 /
+//! 表没有分区 / 老服务端没有这条语句时，回退 `MIN/MAX` 合成均分切点
+//! （聚合在服务端做，一次往返）。
 //!
 //! # 开工前自检
 //!
@@ -107,7 +108,12 @@ impl QmdbSourceConnector {
 
     /// 规划分片 —— 切法走**内核 `partition` 那套**，与 doris 两侧同源
     ///
-    /// range 且用户没给边界时探一次 MIN/MAX（聚合在服务端做，一次往返）。
+    /// range 且用户没给边界时探一次边界。
+    ///
+    /// 优先 **`SHOW PARTITIONS`**（qmdb 2026-10-23 新增）：拿真实分区值当切点，
+    /// 每段与存储分区精确对齐 —— qmdb 的分区裁剪每段都能吃到，失败重跑也是
+    /// 分区粒度。列不是分区列 / 表没有分区 / 老服务端没有这条语句时，
+    /// 回退 **MIN/MAX 探测**（聚合在服务端做，一次往返，切点是合成的均分点）。
     async fn plan_splits(&self, spec: &SourceSpec) -> D2DResult<Vec<SourceSplit>> {
         use d2d_connector::partition::{PartitionMode, ProbedBounds};
 
@@ -123,10 +129,26 @@ impl QmdbSourceConnector {
                 .ok_or_else(|| D2DError::internal("qmdb source 未初始化：先调 init()"))?;
             let qualified = self.qualified_table()?;
             let col = p.column.clone().unwrap_or_default();
-            let (lo, hi) = flight.probe_min_max(&qualified, &col).await?;
-            let cuts = d2d_connector::partition::range_cuts(&lo, &hi, p.count)?;
-            info!(column = %col, cuts = cuts.len(), "qmdb range 分片：MIN/MAX 探测完成");
-            Some(ProbedBounds::CutPoints(cuts))
+            match flight.probe_partition_values(&qualified, &col).await? {
+                Some(cuts) => {
+                    info!(
+                        column = %col,
+                        partitions = cuts.len(),
+                        "qmdb range 分片：SHOW PARTITIONS 拿到分区值，按存储分区对齐切"
+                    );
+                    Some(ProbedBounds::CutPoints(cuts))
+                }
+                None => {
+                    let (lo, hi) = flight.probe_min_max(&qualified, &col).await?;
+                    let cuts = d2d_connector::partition::range_cuts(&lo, &hi, p.count)?;
+                    info!(
+                        column = %col,
+                        cuts = cuts.len(),
+                        "qmdb range 分片：MIN/MAX 探测完成（列不是分区列或表无分区，切点是均分值）"
+                    );
+                    Some(ProbedBounds::CutPoints(cuts))
+                }
+            }
         } else {
             None
         };

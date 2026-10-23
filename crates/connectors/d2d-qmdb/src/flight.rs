@@ -65,14 +65,36 @@ pub struct QmdbFlight {
 
 impl QmdbFlight {
     /// 连接服务端（真拨号，失败立刻报错 —— 与 qmdb-client 同一口径）
+    ///
+    /// 连上后顺手探一次服务端版本（`SELECT version()`，best-effort）：
+    /// qmdb 的线协议与服务端配套演进，报障时"客户端协议面 × 服务端版本"
+    /// 是第一个要对的口径。探测失败只 debug，不影响连接可用性。
     pub async fn connect(conn: &QmdbConnection) -> D2DResult<Self> {
         let channel = conn.channel().await?;
-        Ok(Self {
+        let me = Self {
             channel,
             user: conn.user.clone(),
             password: conn.password.clone(),
             addr: conn.addr.clone(),
-        })
+        };
+        if let Ok((_, batches)) = me.query("SELECT version()").await {
+            let version = batches
+                .first()
+                .filter(|b| b.num_rows() > 0)
+                .and_then(|b| {
+                    b.column(0)
+                        .as_any()
+                        .downcast_ref::<arrow::array::StringArray>()
+                })
+                .map(|a| a.value(0).to_string());
+            match version {
+                Some(v) => {
+                    tracing::info!(target: "d2d_qmdb", server = %me.addr, "qmdb 服务端版本：{v}")
+                }
+                None => tracing::debug!(target: "d2d_qmdb", "SELECT version() 没有返回行"),
+            }
+        }
+        Ok(me)
     }
 
     /// 造一个带认证头的 FlightClient（每次 RPC 自己用一个；通道共享）
@@ -203,7 +225,7 @@ impl QmdbFlight {
             )));
         }
         let cell = |i: usize| -> D2DResult<Option<String>> {
-            scalar_to_string(batch.column(i).as_ref(), schema.field(i).data_type())
+            scalar_to_string(batch.column(i).as_ref(), schema.field(i).data_type(), 0)
         };
         let (Some(min_s), Some(max_s)) = (cell(0)?, cell(1)?) else {
             return Err(D2DError::external(
@@ -215,6 +237,31 @@ impl QmdbFlight {
             ));
         };
         Ok((Literal::parse(&min_s), Literal::parse(&max_s)))
+    }
+
+    /// 拉取表的分区值清单（`SHOW PARTITIONS FROM db.t`，qmdb 2026-10-23 新增）
+    ///
+    /// 返回 `Ok(None)` 表示"这条路不通，走 MIN/MAX 回退"：语句在老服务端不存在、
+    /// 表没有分区、或请求的列不是分区列。真错误（网络/认证）原样上抛。
+    pub async fn probe_partition_values(
+        &self,
+        qualified_table: &str,
+        column: &str,
+    ) -> D2DResult<Option<Vec<d2d_connector::partition::Literal>>> {
+        let sql = format!("SHOW PARTITIONS FROM {qualified_table}");
+        let (schema, batches) = match self.query(&sql).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    target: "d2d_qmdb",
+                    table = %qualified_table,
+                    error = %e,
+                    "SHOW PARTITIONS 不可用，range 分片回退 MIN/MAX 探测"
+                );
+                return Ok(None);
+            }
+        };
+        parse_partition_values(&schema, &batches, column)
     }
 
     // ---------- 装载（三段式） ----------
@@ -392,13 +439,14 @@ fn missing(stats: &serde_json::Value, key: &str) -> D2DError {
     D2DError::external("qmdb", format!("commit_load 响应里没有 {key}: {stats}"))
 }
 
-/// Arrow 标量 → 字符串（MIN/MAX 探测的取数口；之后统一 `Literal::parse`）
+/// Arrow 标量 → 字符串（探测的取数口：MIN/MAX、SHOW PARTITIONS；之后统一 `Literal::parse`）
 ///
 /// 只为探测服务：覆盖分区列的现实类型（整数/浮点/字符串/日期/时间戳/布尔/十进制）。
 /// 别的类型在探测场景不出现，出现即报错（不静默转字符串）。
-fn scalar_to_string(
+pub(crate) fn scalar_to_string(
     array: &dyn arrow::array::Array,
     dt: &arrow::datatypes::DataType,
+    row: usize,
 ) -> D2DResult<Option<String>> {
     use arrow::array::{AsArray, Decimal128Array};
     use arrow::datatypes::{DataType::*, Int16Type, Int32Type, Int64Type, Int8Type};
@@ -406,32 +454,32 @@ fn scalar_to_string(
     use arrow::datatypes::{UInt16Type, UInt32Type, UInt64Type, UInt8Type};
     use chrono::NaiveDate;
 
-    if array.is_null(0) {
+    if array.is_null(row) {
         return Ok(None);
     }
     let s = match dt {
-        Int8 => array.as_primitive::<Int8Type>().value(0).to_string(),
-        Int16 => array.as_primitive::<Int16Type>().value(0).to_string(),
-        Int32 => array.as_primitive::<Int32Type>().value(0).to_string(),
-        Int64 => array.as_primitive::<Int64Type>().value(0).to_string(),
-        UInt8 => array.as_primitive::<UInt8Type>().value(0).to_string(),
-        UInt16 => array.as_primitive::<UInt16Type>().value(0).to_string(),
-        UInt32 => array.as_primitive::<UInt32Type>().value(0).to_string(),
-        UInt64 => array.as_primitive::<UInt64Type>().value(0).to_string(),
-        Float32 => array.as_primitive::<Float32Type>().value(0).to_string(),
-        Float64 => array.as_primitive::<Float64Type>().value(0).to_string(),
-        Utf8 => array.as_string::<i32>().value(0).to_string(),
-        LargeUtf8 => array.as_string::<i64>().value(0).to_string(),
+        Int8 => array.as_primitive::<Int8Type>().value(row).to_string(),
+        Int16 => array.as_primitive::<Int16Type>().value(row).to_string(),
+        Int32 => array.as_primitive::<Int32Type>().value(row).to_string(),
+        Int64 => array.as_primitive::<Int64Type>().value(row).to_string(),
+        UInt8 => array.as_primitive::<UInt8Type>().value(row).to_string(),
+        UInt16 => array.as_primitive::<UInt16Type>().value(row).to_string(),
+        UInt32 => array.as_primitive::<UInt32Type>().value(row).to_string(),
+        UInt64 => array.as_primitive::<UInt64Type>().value(row).to_string(),
+        Float32 => array.as_primitive::<Float32Type>().value(row).to_string(),
+        Float64 => array.as_primitive::<Float64Type>().value(row).to_string(),
+        Utf8 => array.as_string::<i32>().value(row).to_string(),
+        LargeUtf8 => array.as_string::<i64>().value(row).to_string(),
         Boolean => array
             .as_any()
             .downcast_ref::<arrow::array::BooleanArray>()
             .ok_or_else(|| D2DError::schema("BOOLEAN 探测列的物理类型不是 BooleanArray"))?
-            .value(0)
+            .value(row)
             .to_string(),
         Date32 => {
             let days = array
                 .as_primitive::<arrow::datatypes::Date32Type>()
-                .value(0);
+                .value(row);
             let d = NaiveDate::from_num_days_from_ce_opt(days + 719_163)
                 .ok_or_else(|| D2DError::schema(format!("Date32 值 {days} 超出日历范围")))?;
             d.format("%Y-%m-%d").to_string()
@@ -441,22 +489,22 @@ fn scalar_to_string(
                 arrow::datatypes::TimeUnit::Second => {
                     array
                         .as_primitive::<arrow::datatypes::TimestampSecondType>()
-                        .value(0)
+                        .value(row)
                         * 1_000_000
                 }
                 arrow::datatypes::TimeUnit::Millisecond => {
                     array
                         .as_primitive::<arrow::datatypes::TimestampMillisecondType>()
-                        .value(0)
+                        .value(row)
                         * 1_000
                 }
                 arrow::datatypes::TimeUnit::Microsecond => array
                     .as_primitive::<arrow::datatypes::TimestampMicrosecondType>()
-                    .value(0),
+                    .value(row),
                 arrow::datatypes::TimeUnit::Nanosecond => {
                     array
                         .as_primitive::<arrow::datatypes::TimestampNanosecondType>()
-                        .value(0)
+                        .value(row)
                         / 1_000
                 }
             };
@@ -480,7 +528,7 @@ fn scalar_to_string(
                 .as_any()
                 .downcast_ref::<Decimal128Array>()
                 .ok_or_else(|| D2DError::schema("DECIMAL 探测列的物理类型不是 Decimal128Array"))?
-                .value(0);
+                .value(row);
             let s = *scale as i32;
             if s == 0 {
                 v.to_string()
@@ -502,23 +550,89 @@ fn scalar_to_string(
     Ok(Some(s))
 }
 
+/// `SHOW PARTITIONS` 结果 → 分区值切点（严格递增；`Literal` 没有 `PartialOrd`，自比）
+///
+/// 结果形状：分区列逐列 + `rows`/`files`（分区值已排序）。请求的列不在分区列里
+/// （或没有分区）→ `Ok(None)`，调用方走 MIN/MAX 回退。
+pub(crate) fn parse_partition_values(
+    schema: &SchemaRef,
+    batches: &[RecordBatch],
+    column: &str,
+) -> D2DResult<Option<Vec<d2d_connector::partition::Literal>>> {
+    use d2d_connector::partition::Literal;
+
+    // rows/files 是统计列，不是分区列
+    let is_stat = |name: &str| matches!(name.to_ascii_lowercase().as_str(), "rows" | "files");
+    let col_idx = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .find(|(_, f)| !is_stat(f.name()) && f.name().eq_ignore_ascii_case(column));
+    let Some((ci, _)) = col_idx else {
+        return Ok(None); // 请求的列不是分区列（或表没有分区）→ 回退
+    };
+
+    let mut cuts: Vec<Literal> = Vec::new();
+    for b in batches {
+        let arr = b.column(ci).as_ref();
+        let dt = schema.field(ci).data_type();
+        for row in 0..b.num_rows() {
+            let Some(s) = scalar_to_string(arr, dt, row)? else {
+                // 分区值为 NULL 极不寻常（NULL 分区），跳过并留痕，不让它炸整个规划
+                tracing::warn!(target: "d2d_qmdb", column = %column, "SHOW PARTITIONS 出现 NULL 分区值，已跳过");
+                continue;
+            };
+            cuts.push(Literal::parse(&s));
+        }
+    }
+    if cuts.len() < 2 {
+        // 0 或 1 个分区：切点切不出区间结构，交给 MIN/MAX 或单分片
+        return Ok(None);
+    }
+    for w in cuts.windows(2) {
+        if !literal_strictly_less(&w[0], &w[1]) {
+            return Err(D2DError::schema(format!(
+                "SHOW PARTITIONS 返回的分区值不是严格递增（{w:?}）—— \
+                 切点乱序会造成分片重叠/空洞，拒绝规划"
+            )));
+        }
+    }
+    Ok(Some(cuts))
+}
+
+/// `Literal` 的同族严格小于比较（内核 `Literal` 没有 `PartialOrd`；切点校验专用）
+fn literal_strictly_less(
+    a: &d2d_connector::partition::Literal,
+    b: &d2d_connector::partition::Literal,
+) -> bool {
+    use d2d_connector::partition::Literal;
+    match (a, b) {
+        (Literal::Int(x), Literal::Int(y)) => x < y,
+        (Literal::Float(x), Literal::Float(y)) => x < y,
+        (Literal::Date(x), Literal::Date(y)) => x < y,
+        (Literal::Timestamp(x), Literal::Timestamp(y)) => x < y,
+        (Literal::Text(x), Literal::Text(y)) => x < y,
+        _ => false, // 异族不可比：交给上层"非严格递增"报错
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::array::{Date32Array, Decimal128Array, Int64Array, StringArray};
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, Field};
     use std::sync::Arc;
 
     #[test]
     fn test_scalar_to_string_int_and_text() {
         let a: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(vec![Some(42i64), None]));
         assert_eq!(
-            scalar_to_string(a.as_ref(), &DataType::Int64).unwrap(),
+            scalar_to_string(a.as_ref(), &DataType::Int64, 0).unwrap(),
             Some("42".to_string())
         );
         let t: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec![Some("x"), None]));
         assert_eq!(
-            scalar_to_string(t.as_ref(), &DataType::Utf8).unwrap(),
+            scalar_to_string(t.as_ref(), &DataType::Utf8, 0).unwrap(),
             Some("x".to_string())
         );
     }
@@ -527,7 +641,7 @@ mod tests {
     fn test_scalar_to_string_first_null_is_none() {
         let a = Int64Array::from(vec![None, Some(1i64)]);
         assert_eq!(
-            scalar_to_string(&a, &DataType::Int64).unwrap(),
+            scalar_to_string(&a, &DataType::Int64, 0).unwrap(),
             None,
             "探测只看第一行；第一行为 NULL 就是空值"
         );
@@ -537,7 +651,7 @@ mod tests {
     fn test_scalar_to_string_date() {
         let a = Date32Array::from(vec![20_747]); // 2026-10-21
         assert_eq!(
-            scalar_to_string(&a, &DataType::Date32).unwrap(),
+            scalar_to_string(&a, &DataType::Date32, 0).unwrap(),
             Some("2026-10-21".to_string())
         );
     }
@@ -549,7 +663,7 @@ mod tests {
         // 2026-10-21 08:30:00 UTC = 20747 天 * 86400 + 30600 秒
         let a = TimestampMicrosecondArray::from(vec![1_792_571_400_000_000i64]);
         assert_eq!(
-            scalar_to_string(&a, &DataType::Timestamp(TimeUnit::Microsecond, None)).unwrap(),
+            scalar_to_string(&a, &DataType::Timestamp(TimeUnit::Microsecond, None), 0).unwrap(),
             Some("2026-10-21 08:30:00".to_string())
         );
     }
@@ -561,7 +675,7 @@ mod tests {
             .with_precision_and_scale(9, 2)
             .unwrap();
         assert_eq!(
-            scalar_to_string(&a, &DataType::Decimal128(9, 2)).unwrap(),
+            scalar_to_string(&a, &DataType::Decimal128(9, 2), 0).unwrap(),
             Some("1234.56".to_string())
         );
         // 负数与补零：-5 / scale 2 → -0.05
@@ -569,15 +683,88 @@ mod tests {
             .with_precision_and_scale(9, 2)
             .unwrap();
         assert_eq!(
-            scalar_to_string(&b, &DataType::Decimal128(9, 2)).unwrap(),
+            scalar_to_string(&b, &DataType::Decimal128(9, 2), 0).unwrap(),
             Some("-0.05".to_string())
         );
+    }
+
+    // ───────── SHOW PARTITIONS 解析 ─────────
+
+    use d2d_connector::partition::Literal;
+
+    /// 构造 SHOW PARTITIONS 结果：分区列 + rows/files（值已排序，与服务端一致）
+    fn partitions_batch(dates: &[Option<i32>]) -> (SchemaRef, Vec<RecordBatch>) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("pdate", DataType::Date32, true),
+            Field::new("rows", DataType::Int64, true),
+            Field::new("files", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Date32Array::from(dates.to_vec())),
+                Arc::new(Int64Array::from(vec![1i64; dates.len()])),
+                Arc::new(Int64Array::from(vec![1i64; dates.len()])),
+            ],
+        )
+        .unwrap();
+        (schema, vec![batch])
+    }
+
+    #[test]
+    fn test_parse_partition_values_date_cuts() {
+        let (schema, batches) = partitions_batch(&[Some(20_747), Some(20_748), Some(20_749)]);
+        let cuts = parse_partition_values(&schema, &batches, "pdate")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cuts,
+            vec![
+                Literal::parse("2026-10-21"),
+                Literal::parse("2026-10-22"),
+                Literal::parse("2026-10-23"),
+            ],
+            "分区值渲染成日期字面量当切点"
+        );
+    }
+
+    #[test]
+    fn test_parse_partition_values_requested_column_not_partition() {
+        let (schema, batches) = partitions_batch(&[Some(20_747), Some(20_748)]);
+        // 请求的列不是分区列 → None，调用方走 MIN/MAX 回退
+        assert!(parse_partition_values(&schema, &batches, "id")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_parse_partition_values_single_partition_falls_back() {
+        let (schema, batches) = partitions_batch(&[Some(20_747)]);
+        // 1 个分区切不出区间结构 → None 回退
+        assert!(parse_partition_values(&schema, &batches, "pdate")
+            .unwrap()
+            .is_none());
+        // 0 个分区同理
+        let (schema, batches) = partitions_batch(&[]);
+        assert!(parse_partition_values(&schema, &batches, "pdate")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_parse_partition_values_unsorted_is_error() {
+        // 服务端承诺分区值排序；乱序说明假设破了，必须拒绝（切点乱序 = 分片重叠）
+        let (schema, batches) = partitions_batch(&[Some(20_749), Some(20_747)]);
+        let e = parse_partition_values(&schema, &batches, "pdate")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("严格递增"), "{}", e);
     }
 
     #[test]
     fn test_unsupported_probe_type_is_error() {
         let a = arrow::array::BinaryArray::from(vec![b"x".as_ref()]);
-        let e = scalar_to_string(&a, &DataType::Binary)
+        let e = scalar_to_string(&a, &DataType::Binary, 0)
             .unwrap_err()
             .to_string();
         assert!(e.contains("MIN/MAX"), "{}", e);

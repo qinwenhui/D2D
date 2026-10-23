@@ -630,7 +630,9 @@ sink:
   失败恢复姿势 = `load.mode: overwrite_partitions` 圈范围重跑（先覆盖旧文件，幂等）。
 - 分区切法支持 `list` / `range` / `none`；`hash` 不支持（qmdb 的 SQL 面没有稳定的
   行哈希函数，规划期会直接报错）。
-- `partition.mode: range` 缺边界时会自动做一次 `MIN/MAX` 探测（qmdb 的聚合点查很便宜）。
+- `partition.mode: range` 缺边界时自动探测：优先 `SHOW PARTITIONS` 拿**真实分区值**
+  当切点（每段与存储分区精确对齐，qmdb 的分区裁剪每段都吃满，失败重跑也是分区
+  粒度）；列不是分区列 / 表无分区时回退 `MIN/MAX` 合成均分切点。
 - 会话首批写入前会做**列对齐校验**：批次里目标表没有的列会报错（服务端对不上的
   列是静默丢弃的）；目标表多出来的列会警告（服务端按 DEFAULT/NULL 兜底）。
 - 认证 = 每个 RPC 的 `authorization: Bearer user:password` 头；服务端连续失败 10 次

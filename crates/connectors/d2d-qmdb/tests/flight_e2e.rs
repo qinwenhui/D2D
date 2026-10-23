@@ -14,10 +14,10 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use d2d_connector::{SinkConnector, SinkSpec, SourceConnector, SourceSpec};
+use d2d_connector::{SinkConnector, SinkSpec, SourceConnector, SourceSpec, SourceSplit};
 use d2d_qmdb::QmdbConnection;
 use d2d_qmdb::{QmdbFlight, QmdbSinkConnector, QmdbSourceConnector};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -125,24 +125,37 @@ async fn point_lookup(flight: &QmdbFlight, table: &str, id: i64) -> (Option<Stri
 async fn flight_sink_then_source_roundtrip() {
     let flight = raw_client().await;
     let table = table_name();
-    let created = flight
+    if let Err(e) = flight
         .query(&format!(
             "CREATE TABLE {table} (\
              id BIGINT, name VARCHAR, amount DECIMAL(9,2), flag BOOLEAN, \
              pdate DATE, ts TIMESTAMP)"
         ))
-        .await;
-    if let Err(e) = created {
+        .await
+    {
         let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
         panic!("建表失败（检查账号权限/DDL 语法）: {e}");
     }
+
+    // 断言失败也要 teardown —— 否则就在 bench_lc 留孤儿表（qmdb 方代清过一次）
+    let result = std::panic::AssertUnwindSafe(roundtrip_body(&flight, &table))
+        .catch_unwind()
+        .await;
+    let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn roundtrip_body(flight: &QmdbFlight, table: &str) {
+    let short = table.rsplit_once('.').unwrap().1;
 
     // ── 写：三段式装载 ──
     let sink_spec: SinkSpec = serde_json::from_value(serde_json::json!({
         "connector": "qmdb",
         "connection": conn_json(),
         "database": "bench_lc",
-        "table": table.rsplit_once('.').unwrap().1,
+        "table": short,
     }))
     .unwrap();
     let mut sink = QmdbSinkConnector::new();
@@ -162,7 +175,7 @@ async fn flight_sink_then_source_roundtrip() {
         "connector": "qmdb",
         "connection": conn_json(),
         "database": "bench_lc",
-        "table": table.rsplit_once('.').unwrap().1,
+        "table": short,
         "properties": { "load": { "mode": "overwrite_table" } }
     }))
     .unwrap();
@@ -193,7 +206,7 @@ async fn flight_sink_then_source_roundtrip() {
         "connector": "qmdb",
         "connection": conn_json(),
         "schema_name": "bench_lc",
-        "table": table.rsplit_once('.').unwrap().1,
+        "table": short,
         "query": { "limit": 2 },
     }))
     .unwrap();
@@ -216,18 +229,6 @@ async fn flight_sink_then_source_roundtrip() {
         "对账计数应与读到的行数一致"
     );
     source.close().await.unwrap();
-
-    // ── 清理 ──
-    drop(sink);
-    drop(session);
-    flight.query(&format!("DROP TABLE {table}")).await.unwrap();
-    assert!(
-        flight
-            .query(&format!("SELECT COUNT(*) FROM {table}"))
-            .await
-            .is_err(),
-        "表应该已经删掉（再查要报错）"
-    );
 }
 
 /// 认证失败要报出明确的"认证失败"（而不是笼统的传输错误）
@@ -260,12 +261,26 @@ async fn bad_password_fails_loud() {
 async fn out_of_order_columns_align_by_name() {
     let flight = raw_client().await;
     let table = table_name();
-    flight
+    if let Err(e) = flight
         .query(&format!(
             "CREATE TABLE {table} (id BIGINT, name VARCHAR, amount DECIMAL(9,2))"
         ))
         .await
-        .unwrap();
+    {
+        let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+        panic!("建表失败: {e}");
+    }
+    let result = std::panic::AssertUnwindSafe(out_of_order_body(&flight, &table))
+        .catch_unwind()
+        .await;
+    let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn out_of_order_body(flight: &QmdbFlight, table: &str) {
+    let short = table.rsplit_once('.').unwrap().1;
 
     // 批次列序 = (amount, name, id)，与目标表 (id, name, amount) 刻意相反；
     // 类型各异（DECIMAL/UTF8/INT64），如果服务端按位置摆就会炸或错位
@@ -292,7 +307,7 @@ async fn out_of_order_columns_align_by_name() {
         "connector": "qmdb",
         "connection": conn_json(),
         "database": "bench_lc",
-        "table": table.rsplit_once('.').unwrap().1,
+        "table": short,
     }))
     .unwrap();
     let mut sink = QmdbSinkConnector::new();
@@ -302,10 +317,10 @@ async fn out_of_order_columns_align_by_name() {
     session.commit().await.unwrap();
 
     // 逐行核对：值跟着**列名**走，不跟位置走
-    let (name7, amount7) = point_lookup(&flight, &table, 7).await;
+    let (name7, amount7) = point_lookup(flight, table, 7).await;
     assert_eq!(name7.as_deref(), Some("甲"), "name 值错位了");
     assert_eq!(amount7, Some(150i128), "amount 值错位了（1.50）");
-    let (name8, amount8) = point_lookup(&flight, &table, 8).await;
+    let (name8, amount8) = point_lookup(flight, table, 8).await;
     assert_eq!(name8.as_deref(), Some("乙"));
     assert_eq!(amount8, Some(-25i128), "amount 值错位了（-0.25）");
 
@@ -324,11 +339,137 @@ async fn out_of_order_columns_align_by_name() {
     )
     .unwrap();
     let stats = flight
-        .load_table(&table, vec![ghost], &d2d_qmdb::LoadMode::Append, None)
+        .load_table(table, vec![ghost], &d2d_qmdb::LoadMode::Append, None)
         .await;
     let err = stats.expect_err("未知列必须被服务端拒绝（静默丢弃的时代结束了）");
     let msg = err.to_string();
     assert!(msg.contains("ghost") || msg.contains("未知列"), "{msg}");
+}
 
-    flight.query(&format!("DROP TABLE {table}")).await.unwrap();
+/// **range 分片无边界 → SHOW PARTITIONS 拿分区值当切点**（分区对齐切分）
+///
+/// qmdb 2026-10-23 新增 `SHOW PARTITIONS FROM db.t`（分区列 + rows/files）。
+/// range 不给 lower/upper 时，分片规划优先拿真实分区值当切点 —— 每段与存储
+/// 分区精确对齐（qmdb 分区裁剪每段都吃满），而不是 MIN/MAX 合成均分点。
+/// 本测试建分区表 → 装三个分区的数据 → 无边界 range 规划 → 断言：
+/// 切点=分区值、全部数据无重叠无空洞地被读回。
+#[tokio::test]
+#[ignore = "requires a running qmdb server; set QMDB_FLIGHT_ADDR / QMDB_FLIGHT_USER / QMDB_FLIGHT_PASS"]
+async fn range_splits_follow_partitions() {
+    let flight = raw_client().await;
+    let table = table_name();
+    if let Err(e) = flight
+        .query(&format!(
+            "CREATE TABLE {table} (id BIGINT, pdate DATE) PARTITIONED BY (pdate)"
+        ))
+        .await
+    {
+        let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+        panic!("建表失败（检查 PARTITIONED BY 语法）: {e}");
+    }
+    let result = std::panic::AssertUnwindSafe(range_splits_body(&flight, &table))
+        .catch_unwind()
+        .await;
+    let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn range_splits_body(_flight: &QmdbFlight, table: &str) {
+    let short = table.rsplit_once('.').unwrap().1;
+
+    // 装 3 个分区 × 2 行：2026-10-21 / 22 / 23
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("pdate", DataType::Date32, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1i64, 2, 3, 4, 5, 6])),
+            Arc::new(Date32Array::from(vec![
+                Some(20_747),
+                Some(20_747),
+                Some(20_748),
+                Some(20_748),
+                Some(20_749),
+                Some(20_749),
+            ])),
+        ],
+    )
+    .unwrap();
+    let sink_spec: SinkSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "database": "bench_lc",
+        "table": short,
+    }))
+    .unwrap();
+    let mut sink = QmdbSinkConnector::new();
+    sink.init(&sink_spec).await.unwrap();
+    let mut session = sink.begin_session(&sink_spec).await.unwrap();
+    assert_eq!(session.write_batch(batch).await.unwrap(), 6);
+    session.commit().await.unwrap();
+
+    // range 无边界 + count 8（远大于分区数：分区值切点优先于 count 合成）
+    let source_spec: SourceSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "schema_name": "bench_lc",
+        "table": short,
+        "partition": {
+            "mode": "range",
+            "column": "pdate",
+            "count": 8
+        }
+    }))
+    .unwrap();
+    let mut source = QmdbSourceConnector::new();
+    source.init(&source_spec).await.unwrap();
+    let splits = source.split(&source_spec).await.unwrap();
+
+    // 3 个分区值切点 → 内核给 4 段：(-∞,p1) / [p1,p2) / [p2,p3) / [p3,+∞)
+    // 首尾两段结构性必须（覆盖性靠"首尾无界"保证），实践中是空的
+    assert_eq!(
+        splits.len(),
+        4,
+        "切点应来自 SHOW PARTITIONS 的分区值，而不是 count 均分: {:?}",
+        splits
+            .iter()
+            .map(|s| split_condition_of(&s))
+            .collect::<Vec<_>>()
+    );
+    let conds: Vec<String> = splits.iter().map(split_condition_of).collect();
+    assert!(
+        conds[1].contains("2026-10-21") && conds[1].contains("2026-10-22"),
+        "{}",
+        conds[1]
+    );
+    assert!(
+        conds[2].contains("2026-10-22") && conds[2].contains("2026-10-23"),
+        "{}",
+        conds[2]
+    );
+
+    // 全部数据无重叠无空洞地读回 —— 分区对齐切分的覆盖性验证
+    let mut total = 0usize;
+    for s in &splits {
+        let mut stream = source.read(s).await.unwrap();
+        while let Some(item) = stream.next().await {
+            total += item.unwrap().num_rows();
+        }
+    }
+    assert_eq!(total, 6, "分片并集必须覆盖全部 6 行");
+    assert_eq!(source.exported_rows(), Some(6));
+    source.close().await.unwrap();
+}
+
+fn split_condition_of(split: &SourceSplit) -> String {
+    split
+        .split_info
+        .get("where_condition")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
