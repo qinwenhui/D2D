@@ -572,7 +572,7 @@ pub(crate) fn parse_partition_values(
         return Ok(None); // 请求的列不是分区列（或表没有分区）→ 回退
     };
 
-    let mut cuts: Vec<Literal> = Vec::new();
+    let mut values: Vec<Literal> = Vec::new();
     for b in batches {
         let arr = b.column(ci).as_ref();
         let dt = schema.field(ci).data_type();
@@ -582,11 +582,28 @@ pub(crate) fn parse_partition_values(
                 tracing::warn!(target: "d2d_qmdb", column = %column, "SHOW PARTITIONS 出现 NULL 分区值，已跳过");
                 continue;
             };
-            cuts.push(Literal::parse(&s));
+            values.push(Literal::parse(&s));
+        }
+    }
+    if values.len() < 2 {
+        // 0 或 1 个分区：切点切不出区间结构，交给 MIN/MAX 或单分片
+        return Ok(None);
+    }
+
+    // **去重**：分区可以是**多级**的（实测 `bench_full.t_dnl_day_24result_unit` 是
+    // `(pdate, version_id)` 两级）——按 pdate 切时，同一个 pdate 会随 version_id
+    // 重复出现。切点要的是**不同的值**，重复的直接去掉。
+    let mut cuts: Vec<Literal> = Vec::with_capacity(values.len());
+    for v in values {
+        let dup = cuts
+            .last()
+            .map(|last| literal_equal(last, &v))
+            .unwrap_or(false);
+        if !dup {
+            cuts.push(v);
         }
     }
     if cuts.len() < 2 {
-        // 0 或 1 个分区：切点切不出区间结构，交给 MIN/MAX 或单分片
         return Ok(None);
     }
     for w in cuts.windows(2) {
@@ -598,6 +615,22 @@ pub(crate) fn parse_partition_values(
         }
     }
     Ok(Some(cuts))
+}
+
+/// `Literal` 的同族相等比较（去重用）
+fn literal_equal(
+    a: &d2d_connector::partition::Literal,
+    b: &d2d_connector::partition::Literal,
+) -> bool {
+    use d2d_connector::partition::Literal;
+    match (a, b) {
+        (Literal::Int(x), Literal::Int(y)) => x == y,
+        (Literal::Float(x), Literal::Float(y)) => x == y,
+        (Literal::Date(x), Literal::Date(y)) => x == y,
+        (Literal::Timestamp(x), Literal::Timestamp(y)) => x == y,
+        (Literal::Text(x), Literal::Text(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// `Literal` 的同族严格小于比较（内核 `Literal` 没有 `PartialOrd`；切点校验专用）
@@ -749,6 +782,51 @@ mod tests {
         assert!(parse_partition_values(&schema, &batches, "pdate")
             .unwrap()
             .is_none());
+    }
+
+    /// **回归：两级分区（pdate, version_id）按 pdate 切** —— pdate 会重复出现
+    ///
+    /// 实测 `bench_full.t_dnl_day_24result_unit` 是 `(pdate, version_id)` 两级分区：
+    /// SHOW PARTITIONS 对每个 (pdate, version_id) 组合返一行，于是 pdate 列的值
+    /// **重复**。不去重的话，严格递增校验会误报"分区值乱序"→ 整个 range 规划失败。
+    #[test]
+    fn test_parse_partition_values_dedupes_composite_partitions() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("pdate", DataType::Utf8, true),
+            Field::new("version_id", DataType::Utf8, true),
+            Field::new("rows", DataType::Int64, true),
+            Field::new("files", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    "2025-10-01",
+                    "2025-10-01",
+                    "2025-10-01",
+                    "2025-10-02",
+                    "2025-10-02",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "10_20251001_1",
+                    "11_20251001_1",
+                    "12_20251001_1",
+                    "1_20251002_1",
+                    "2_20251002_1",
+                ])),
+                Arc::new(Int64Array::from(vec![1i64; 5])),
+                Arc::new(Int64Array::from(vec![1i64; 5])),
+            ],
+        )
+        .unwrap();
+        let cuts = parse_partition_values(&schema, &[batch], "pdate")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cuts,
+            vec![Literal::parse("2025-10-01"), Literal::parse("2025-10-02")],
+            "重复的 pdate 必须去重，只留不同的分区值当切点"
+        );
     }
 
     #[test]
