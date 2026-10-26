@@ -166,7 +166,7 @@ async fn roundtrip_body(flight: &QmdbFlight, table: &str) {
 
     // 对账：COUNT 必须等于写入行数
     assert_eq!(
-        count(&flight, &format!("SELECT COUNT(*) FROM {table}")).await,
+        count(flight, &format!("SELECT COUNT(*) FROM {table}")).await,
         3
     );
 
@@ -185,19 +185,19 @@ async fn roundtrip_body(flight: &QmdbFlight, table: &str) {
     assert_eq!(s2.write_batch(sample_batch()).await.unwrap(), 3);
     s2.commit().await.unwrap();
     assert_eq!(
-        count(&flight, &format!("SELECT COUNT(*) FROM {table}")).await,
+        count(flight, &format!("SELECT COUNT(*) FROM {table}")).await,
         3,
         "overwrite_table 应该整表替换，不是追加"
     );
 
     // 值抽查：中文/NULL/DECIMAL 没有被静默改写（逐行点查，最直白）
-    let (n1, a1) = point_lookup(&flight, &table, 1).await;
+    let (n1, a1) = point_lookup(flight, table, 1).await;
     assert_eq!(n1.as_deref(), Some("a"));
     assert_eq!(a1, Some(123456i128), "DECIMAL(9,2) 未定点值 1234.56");
-    let (n2, a2) = point_lookup(&flight, &table, 2).await;
+    let (n2, a2) = point_lookup(flight, table, 2).await;
     assert_eq!(n2, None, "NULL 不该被写成空串或别的");
     assert_eq!(a2, None);
-    let (n3, a3) = point_lookup(&flight, &table, 3).await;
+    let (n3, a3) = point_lookup(flight, table, 3).await;
     assert_eq!(n3.as_deref(), Some("中文值"));
     assert_eq!(a3, Some(-5i128));
 
@@ -435,10 +435,7 @@ async fn range_splits_body(_flight: &QmdbFlight, table: &str) {
         splits.len(),
         4,
         "切点应来自 SHOW PARTITIONS 的分区值，而不是 count 均分: {:?}",
-        splits
-            .iter()
-            .map(|s| split_condition_of(&s))
-            .collect::<Vec<_>>()
+        splits.iter().map(split_condition_of).collect::<Vec<_>>()
     );
     let conds: Vec<String> = splits.iter().map(split_condition_of).collect();
     assert!(
