@@ -115,6 +115,10 @@ d2d-mysql = { path = "crates/connectors/d2d-mysql" }
 d2d-postgres = { path = "crates/connectors/d2d-postgres" }
 d2d-qsdb = { path = "crates/connectors/d2d-qsdb" }
 d2d-qmdb = { path = "crates/connectors/d2d-qmdb" }
+# qmdb 只走 Arrow Flight SQL 数据面，**不引 qmdb-client**：那个 crate 跟服务端
+# 配套发布（内部 GitLab 仓库，公开渠道拿不到），且锁在服务端 DataFusion 的
+# arrow 59 上，而内核全线 arrow 60。qmdb 的线格式跨 arrow 版本稳定，所以这里
+# 用 arrow 60 原生实现同一套协议 —— 公开仓库保持自包含，不依赖任何私有包。
 # QSDB 只走官方 HTTP 客户端（crates.io，MIT）。embedded 用的 `qsdb` crate
 # 没有发布，公开分支无法自包含，因此不再引入。
 qsdb-client = { version = "0.1.0", features = ["ipc"] }

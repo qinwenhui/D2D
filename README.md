@@ -205,6 +205,33 @@ DPI 方式在运行机上还需要两样东西：
 
 `libdmdpi.so` 不在发布包里（达梦 SDK 许可原因）。见 [达梦 DPI](#达梦-dpi)。
 
+### 现成的示例配置
+
+`examples/` 下有一批可直接改的完整任务，口令与地址都写成 `${ENV}` 占位符
+（替换成真实值，或用同名环境变量导出）：
+
+| 示例 | 源 → 目标 | 值得看的点 |
+|---|---|---|
+| `dameng_to_dameng.yaml` | 达梦 → 达梦 | 同构迁移的最小配置 |
+| `dameng_to_doris.yaml` | 达梦 → Doris | 读侧 ODBC 逐行、列名映射 |
+| `dameng_to_doris_dmfldr.yaml` | 达梦 → Doris | 读侧 `dmfldr` 整表高速导出 |
+| `dameng_to_doris_dpi.yaml` | 达梦 → Doris | 读侧 `dpi` 直通 |
+| `doris_to_dameng_dpi.yaml` | Doris → 达梦 | 读侧 Flight SQL 列式、写侧 DPI 数组绑定 |
+| `doris_to_doris.yaml` | Doris → Doris | 读侧 Flight SQL、写侧 Stream Load |
+| `mysql_to_mysql.yaml` | MySQL → MySQL | 最简单的两库互搬 |
+| `mysql_to_qsdb_http.yaml` | MySQL → QSDB | 写侧 Arrow IPC |
+| `postgres_to_postgres.yaml` | PostgreSQL → PostgreSQL | 类型契约 `type_contract` 写法 |
+| `postgres_to_qsdb_http.yaml` | PostgreSQL → QSDB | 同上 + QSDB 写侧 |
+| `qmdb_to_dameng.yaml` | qmdb → 达梦 | qmdb 读侧（Flight SQL）+ 分区切分 |
+| `doris_to_qmdb.yaml` | Doris → qmdb | qmdb 写侧（三段式装载 + 分区覆盖） |
+
+```bash
+# 拿示例改一改就能跑；先 --dry-run 校验配置与内存账
+cp examples/qmdb_to_dameng.yaml job.yaml
+$EDITOR job.yaml
+./d2d --config job.yaml --dry-run
+```
+
 ## 配置参考
 
 一份任务配置由六段组成，只有 `source` / `sink` 是必需的：
@@ -591,16 +618,41 @@ sink:
 
 ### qmdb
 
+qmdb 是 Arrow-native 的列式数据库，数据面是 **Arrow Flight SQL**（gRPC）。D2D 用
+**arrow 60 原生直连**这条协议 —— **不需要装任何 qmdb 客户端库**（不是 JDBC 驱动、
+不是 SDK，只有一个能说 Flight SQL 的服务端就够）。
+
+> **为什么不用官方的 `qmdb-client` crate**：它与服务端配套发布，依赖锁在服务端
+> DataFusion 的 arrow 59 上；而 D2D 全线 arrow 60。qmdb 的线格式 = gRPC(protobuf)
+> + Arrow IPC(flatbuffers)，**跨 arrow crate 版本稳定**，所以这里用 arrow 60 直接
+> 实现同一套协议（读=标准 FlightSQL 查询，写=服务端三段式装载），与 qmdb 的
+> JDBC/官方客户端走的是**同一条服务端路径、同一个错误口径**。
+> 好处是公开仓库自包含：不引入任何只在私有仓库发布的 crate。
+
+一份完整可跑的任务（qmdb 宽表 → 达梦）：
+
 ```yaml
+job:
+  name: qmdb_to_dameng
+
+flow:
+  source: { concurrency: 8 }
+  pipeline: { concurrency: 8 }
+  sink:
+    concurrency: 16
+    batch_bytes: 64MB          # 一份数据 = 一次装载（内核攒批，连接器不攒）
+
 source:
   connector: qmdb
+  method: flight               # 可省略；qmdb 只有这一条数据面
   connection:
-    addr: "192.0.2.13:31337"          # Flight SQL 端点（host:port 必填）
+    addr: "${QMDB_ADDR}"      # host:port 必填，如 192.0.2.13:31337
     user: "${QMDB_USER}"
     password: "${QMDB_PASS}"
-  schema_name: "bench_lc"             # qmdb 的库名（qmdb 是多库的，表名一律全限定）
-  table: dwd_wide_gen
-  partition:                          # 按 qmdb 分区列切，触发服务端分区裁剪
+    connect_timeout_ms: 5000
+  schema_name: "bench_lc"      # qmdb 的库名（qmdb 是多库的，表名一律全限定）
+  table: "dwd_wide_gen"
+  partition:                   # 按 qmdb 分区列切，触发服务端分区裁剪
     mode: "range"
     column: "pdate"
     count: 8
@@ -608,24 +660,52 @@ source:
     upper: "2026-10-09"
 
 sink:
+  connector: dameng
+  method: dpi                  # 数组参数绑定写入
+  connection:
+    dsn: "${DM_DSN}"
+    user: "${DM_USER}"
+    password: "${DM_PASS}"
+  database: "APP"
+  table: "DWD_WIDE_GEN"
+
+engine:
+  memory_mb: 4096
+```
+
+反向（写 qmdb）只要换 sink 段，写入模式由 `sink.properties.load` 控制：
+
+```yaml
+sink:
   connector: qmdb
   connection:
-    addr: "192.0.2.13:31337"
+    addr: "${QMDB_ADDR}"
     user: "${QMDB_USER}"
     password: "${QMDB_PASS}"
   database: "bench_lc"
-  table: dst_big
+  table: "dst_big"
   properties:
     load:
       mode: "overwrite_partitions"    # append（缺省）| overwrite_partitions | overwrite_table
       partitions:                     # mode=overwrite_partitions 时的分区谓词
         - "pdate BETWEEN '2026-10-01' AND '2026-10-08'"
+      # watermark:                    # 可选：commit 时登记水位（SHOW WATERMARKS 可查）
+      #   name: daily
+      #   value: "2026-10-08"
 ```
 
-- 数据面是 **Arrow Flight SQL**（与 qmdb 的 JDBC/官方客户端同一条服务端路径）；
-  读=列式直传（无行解析），写=三段式装载 `begin_load → do_put → commit_load`，
-  任意阶段失败自动 abort，不留半截数据。
-- 连接器用 arrow 60 原生直连（qmdb 的线格式跨 arrow 版本稳定），无额外原生依赖。
+完整示例文件在 [`examples/`](examples/) 里（口令一律写成 `${ENV}` 占位符）：
+
+| 示例 | 干什么 |
+|---|---|
+| `qmdb_to_dameng.yaml` | qmdb 宽表 → 达梦（读用 Flight SQL，写用 DPI） |
+| `doris_to_qmdb.yaml` | Doris → qmdb（读用 Flight SQL，写用三段式装载 + 分区覆盖） |
+
+行为要点：
+
+- **读**=列式直传：`GetFlightInfo` 拿执行票据 → `DoGet` 逐批收 Arrow 批，
+  没有行解析、没有类型重建；**写**=三段式装载 `begin_load → do_put(load_id) →
+  commit_load`，任意阶段失败自动 abort，**不留半截数据**。
 - **写入不自动重试**：装载协议没有幂等令牌，commit 响应丢失后重试就是重复数据。
   失败恢复姿势 = `load.mode: overwrite_partitions` 圈范围重跑（先覆盖旧文件，幂等）。
 - 分区切法支持 `list` / `range` / `none`；`hash` 不支持（qmdb 的 SQL 面没有稳定的
