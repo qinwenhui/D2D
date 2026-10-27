@@ -14,7 +14,9 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use d2d_connector::{SinkConnector, SinkSpec, SourceConnector, SourceSpec, SourceSplit};
+use d2d_connector::{
+    PhysicalSink, SinkConnector, SinkSpec, SourceConnector, SourceSpec, SourceSplit,
+};
 use d2d_qmdb::QmdbConnection;
 use d2d_qmdb::{QmdbFlight, QmdbSinkConnector, QmdbSourceConnector};
 use futures::{FutureExt, StreamExt};
@@ -469,4 +471,169 @@ fn split_condition_of(split: &SourceSplit) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string()
+}
+
+/// **物理载荷装载**（协议 §2.1）：CSV 字节直传，客户端零 Arrow 转换
+///
+/// 兼做服务端 CSV 行为的**行为规格探测**：
+/// - 空字段 = NULL（协议口径）；**空串也是空字段** → 服务端存成什么？
+/// - 裸反斜杠值（judge 把 `\` 列为受限，但本测试绕过协商直发 —— 看服务端是否解释转义）
+/// - 时间戳两种分隔（`空格` / ISO `T`）哪个能解析
+/// - 表头大小写（源端大写列名 vs qmdb 小写折叠）
+/// - 一个块 = 一次装载会话；多块 = 多会话追加
+#[tokio::test]
+#[ignore = "requires a running qmdb server; set QMDB_FLIGHT_ADDR / QMDB_FLIGHT_USER / QMDB_FLIGHT_PASS"]
+async fn physical_csv_load_roundtrip() {
+    let flight = raw_client().await;
+    let table = table_name();
+    if let Err(e) = flight
+        .query(&format!(
+            "CREATE TABLE {table} (\
+             id BIGINT, name VARCHAR, amount DECIMAL(9,2), pdate DATE, ts TIMESTAMP)"
+        ))
+        .await
+    {
+        let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+        panic!("建表失败: {e}");
+    }
+    let result = std::panic::AssertUnwindSafe(physical_csv_body(&flight, &table))
+        .catch_unwind()
+        .await;
+    let _ = flight.query(&format!("DROP TABLE IF EXISTS {table}")).await;
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn physical_csv_body(flight: &QmdbFlight, table: &str) {
+    let short = table.rsplit_once('.').unwrap().1;
+    let columns: Vec<String> = ["ID", "NAME", "AMOUNT", "PDATE", "TS"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut sink = QmdbSinkConnector::new();
+    let spec: SinkSpec = serde_json::from_value(serde_json::json!({
+        "connector": "qmdb",
+        "connection": conn_json(),
+        "database": "bench_lc",
+        "table": short,
+    }))
+    .unwrap();
+    sink.init(&spec).await.unwrap();
+
+    // 直通协商必须通过（qmdb 方言：`,` 分隔 + 空字段 NULL）
+    let fmt = d2d_connector::PhysicalFormat::csv(
+        d2d_connector::CsvDialect {
+            column_separator: b',',
+            line_delimiter: b'\n',
+            quote: None,
+            escape: None,
+            null_literal: None,
+        },
+        d2d_connector::Charset::Utf8,
+        columns.clone(),
+    );
+    let compat = sink.accepts_physical(&fmt);
+    assert!(
+        matches!(compat, d2d_connector::PhysicalCompat::Accept { .. }),
+        "qmdb 方言必须被接受: {compat:?}"
+    );
+
+    let mut session = sink.begin_physical(&fmt).await.unwrap();
+
+    // 块 1：NULL/空串/中文/反斜杠/两种时间戳分隔
+    //（表头由会话拼，块里只有数据行）
+    let block1 = "1,甲,12.50,2026-10-21,2026-10-21 12:00:00\n\
+                  2,,9.99,2026-10-22,\n\
+                  3,中文值,-0.25,2026-10-23,2026-10-23T08:30:00\n\
+                  4,back\\slash,1.00,2026-10-23,2026-10-23 09:00:00\n";
+    let written = session
+        .write_block(d2d_connector::PhysicalBlock {
+            bytes: block1.as_bytes().to_vec(),
+            rows: 4,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("块 1 装载失败: {e}"));
+    assert_eq!(written, 4);
+
+    // 块 2：第二个文件/会话，append 追加
+    let block2 = "5,乙,7.00,2026-10-24,2026-10-24 10:00:00\n".as_bytes().to_vec();
+    let written = session
+        .write_block(d2d_connector::PhysicalBlock {
+            bytes: block2,
+            rows: 1,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("块 2 装载失败: {e}"));
+    assert_eq!(written, 1);
+    assert_eq!(session.commit().await.unwrap(), 5);
+
+    // 行数对账
+    assert_eq!(
+        count(flight, &format!("SELECT COUNT(*) FROM {table}")).await,
+        5
+    );
+
+    // ── 值抽查（2026-10-27 实测固化的服务端 CSV 语义）──
+    // 空字段 = NULL（协议口径）；时间戳 `空格` 与 ISO `T` 两种分隔都解析；
+    // 反斜杠原样保留（服务端不解释转义）；表头大写列名按名列对齐。
+    let name_of = |flight: &QmdbFlight, id: i64| {
+        let flight = flight.clone();
+        async move {
+            let (_, batches) = flight
+                .query(&format!("SELECT name, ts FROM {table} WHERE id = {id}"))
+                .await
+                .unwrap();
+            let b = batches.last().unwrap();
+            let name = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let ts = b
+                .column(1)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            (
+                if name.is_null(0) {
+                    None
+                } else {
+                    Some(name.value(0).to_string())
+                },
+                if ts.is_null(0) {
+                    None
+                } else {
+                    ts.value_as_datetime(0).map(|d| d.to_string())
+                },
+            )
+        }
+    };
+
+    let (n, ts) = name_of(flight, 1).await;
+    assert_eq!(n.as_deref(), Some("甲"));
+    assert_eq!(
+        ts.as_deref(),
+        Some("2026-10-21 12:00:00"),
+        "空格分隔的时间戳"
+    );
+
+    let (n, ts) = name_of(flight, 2).await;
+    assert_eq!(n, None, "空字段必须落成 NULL");
+    assert_eq!(ts, None, "空字段必须落成 NULL");
+
+    let (n, _) = name_of(flight, 3).await;
+    assert_eq!(n.as_deref(), Some("中文值"), "中文值被改写");
+
+    let (n, ts) = name_of(flight, 4).await;
+    assert_eq!(
+        n.as_deref(),
+        Some("back\\slash"),
+        "反斜杠必须原样保留（不解释转义）"
+    );
+    assert_eq!(
+        ts.as_deref(),
+        Some("2026-10-23 09:00:00"),
+        "ISO `T` 分隔的时间戳"
+    );
+
+    let (n, _) = name_of(flight, 5).await;
+    assert_eq!(n.as_deref(), Some("乙"));
 }

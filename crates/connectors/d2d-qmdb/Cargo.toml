@@ -10,6 +10,8 @@ d2d-core = { workspace = true }
 d2d-connector = { workspace = true }
 # src/types.rs 的类型适配器要实现 d2d_types::TypeAdapter
 d2d-types = { workspace = true }
+# 物理直通会话的"在飞载荷"内存申报（与 doris 同一款 MemMeter）
+d2d-memory = { workspace = true }
 arrow = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -24,6 +26,8 @@ arrow-flight = { workspace = true }
 tonic = { workspace = true }
 # FlightSQL 命令要 pack 进 google.protobuf.Any（`Any::encode_to_vec` 的 trait 在这）
 prost = "0.14"
+# 物理载荷切块：Bytes::slice 零拷贝视图（put_raw）
+bytes = { workspace = true }
 # MIN/MAX 探测要把 Arrow 的 Date32/Timestamp 渲染成 SQL 字面量
 chrono = { workspace = true }
 

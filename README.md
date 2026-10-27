@@ -715,6 +715,25 @@ sink:
   粒度）；列不是分区列 / 表无分区时回退 `MIN/MAX` 合成均分切点。
 - 会话首批写入前会做**列对齐校验**：批次里目标表没有的列会报错（服务端对不上的
   列是静默丢弃的）；目标表多出来的列会警告（服务端按 DEFAULT/NULL 兜底）。
+- **物理直通**（协议 §2.1）：当源也能产出字节载荷且无转换算子时自动启用 ——
+  装载走 `begin_load(format=csv)`，CSV 文件字节原样切块上送（4MB/块），客户端
+  不做任何 Arrow 转换，CPU 趋零（qmdb 服务端要求 ≥ 含物理载荷的版本）。约定：
+  源端方言配 `column_separator: ","` + `null_literal: ""`（qmdb CSV 固定 `,` 分隔、
+  空字段即 NULL、不可配；文件含表头、列名大小写无关按名列对齐）。一个物理块 =
+  一次装载会话 = 每分区一个文件，文件粒度天然健康。达梦 DPI 直通的示例：
+
+  ```yaml
+  source:
+    connector: dameng
+    method: dpi
+    properties:
+      dpi:
+        column_separator: ","   # qmdb CSV 固定逗号（缺省 | 是给 Doris 的）
+        null_literal: ""        # qmdb 的 NULL 就是空字段（缺省 \N 是给 Doris 的）
+  ```
+
+  值内出现分隔符/换行/NUL 仍会大声失败（文本结构无法表达该值）；加任意
+  transform 算子即自动回落 Arrow 逻辑面。
 - 认证 = 每个 RPC 的 `authorization: Bearer user:password` 头；服务端连续失败 10 次
   会锁来源 IP 300s —— 密码没改对之前不要反复重试。
 

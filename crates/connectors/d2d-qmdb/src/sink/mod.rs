@@ -28,12 +28,16 @@
 //! - 类型不同 → **警告**（服务端按 Arrow 合法 cast 自动转，非法 cast 会在
 //!   装载时报中文错误，含列名）。
 
+pub mod physical;
 pub mod session;
 
 use async_trait::async_trait;
+use d2d_connector::physical::{PhysicalCompat, PhysicalFormat, PhysicalSession, PhysicalSink};
 use d2d_connector::{SinkConnector, SinkSession, SinkSpec};
 use d2d_core::{D2DError, D2DResult};
-use tracing::info;
+use d2d_memory::MemMeter;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 use crate::config::{LoadOptions, QmdbConnection};
 use crate::flight::QmdbFlight;
@@ -47,6 +51,8 @@ pub struct QmdbSinkConnector {
     /// 目标表 schema（LIMIT 0 探的；会话拿它做首批列对齐）
     target_schema: Option<arrow::datatypes::SchemaRef>,
     load: LoadOptions,
+    /// 物理直通的"在飞载荷"申报尺子（`memory_meter` 口径，见 doris 同款）
+    meter: Option<Arc<MemMeter>>,
 }
 
 impl QmdbSinkConnector {
@@ -57,6 +63,7 @@ impl QmdbSinkConnector {
             qualified_table: None,
             target_schema: None,
             load: LoadOptions::default(),
+            meter: None,
         }
     }
 }
@@ -106,6 +113,11 @@ impl SinkConnector for QmdbSinkConnector {
         self.qualified_table = Some(qualified);
         self.target_schema = Some(schema);
         self.load = load;
+        // 物理直通的载荷尺子：逻辑面（IPC 编码流）不经它，只有直通会话申报
+        self.meter = Some(MemMeter::new(
+            "qmdb 物理装载载荷在飞",
+            "一次物理装载的 CSV 载荷（表头+块字节），已移交 gRPC 层",
+        ));
         Ok(())
     }
 
@@ -135,7 +147,57 @@ impl SinkConnector for QmdbSinkConnector {
         self.flight = None;
         self.qualified_table = None;
         self.target_schema = None;
+        self.meter = None;
         Ok(())
+    }
+
+    fn as_physical(&self) -> Option<&dyn d2d_connector::PhysicalSink> {
+        Some(self)
+    }
+
+    fn memory_meter(&self) -> Option<Arc<MemMeter>> {
+        self.meter.clone()
+    }
+}
+
+/// 物理载荷写入能力（协议 §2.1：`begin_load.format=csv`，文件字节直传）
+///
+/// 裁决逻辑全在纯函数 [`physical::judge`] 里（可单测），这里只负责接线与开会话。
+/// 直通由执行层自动协商（源声明方言 + 本裁决 Accept + 无转换算子），任何一条
+/// 不满足自动回落 Arrow 逻辑面 —— 逻辑面行为不受影响。
+#[async_trait]
+impl PhysicalSink for QmdbSinkConnector {
+    fn accepts_physical(&self, fmt: &PhysicalFormat) -> PhysicalCompat {
+        if self.flight.is_none() {
+            return PhysicalCompat::Reject("qmdb sink 未初始化".to_string());
+        }
+        physical::judge(fmt)
+    }
+
+    async fn begin_physical(&self, fmt: &PhysicalFormat) -> D2DResult<Box<dyn PhysicalSession>> {
+        let flight = self
+            .flight
+            .clone()
+            .ok_or_else(|| D2DError::internal("qmdb sink 未初始化：先调 init()"))?;
+        let table = self
+            .qualified_table
+            .clone()
+            .ok_or_else(|| D2DError::internal("qmdb sink 未初始化：先调 init()"))?;
+        let columns = fmt.columns().to_vec();
+        warn!(
+            connector = %self.name,
+            table = %table,
+            columns = columns.len(),
+            format = %fmt.describe(),
+            "qmdb: 开启物理直通写入会话（CSV 字节原样入三段式装载，客户端不做 Arrow 转换）"
+        );
+        Ok(Box::new(physical::QmdbPhysicalSession::new(
+            flight,
+            table,
+            &columns,
+            self.load.clone(),
+            self.meter.clone(),
+        )))
     }
 }
 

@@ -121,17 +121,25 @@ fn charset_of(code: &CharacterCode) -> Option<Charset> {
 }
 
 /// 直通载荷声明（不碰动态库，便于单测）
+///
+/// 方言由 `DpiParams` 声明（缺省 Doris 口径 `|` + `\N`；qmdb 直通配 `","` + `""`），
+/// 且**声明必须与 `pump_physical` 的实际产出一致** —— 两边同源自 `params`。
 fn physical_format_of(params: &DpiParams, columns: &[String]) -> Option<PhysicalFormat> {
     let charset = charset_of(&params.character_code)?;
+    let null = params.null_literal_bytes();
     Some(PhysicalFormat::csv(
         CsvDialect {
-            column_separator: format::COLUMN_SEPARATOR,
+            column_separator: params.separator_byte(),
             line_delimiter: format::LINE_DELIMITER,
             quote: None,
             escape: None,
-            // 与 Doris 的 null_value 同一个字面量；声明它同时承诺
-            // 「值里不再有别的反斜杠」（本模块逐字段检查）
-            null_literal: Some("\\N".to_string()),
+            // 声明与产出同源：`\N` 档同时承诺「值里不再有别的反斜杠」（逐字段检查）；
+            // 裸空字段档（qmdb）声明 None —— 目标按「空字段 = NULL」解释
+            null_literal: if null.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(null).into_owned())
+            },
         },
         charset,
         columns.to_vec(),
@@ -180,10 +188,12 @@ fn pump_physical(
     let mut s = DpiSession::connect(Arc::clone(lib), cfg)?;
     s.execute(sql, names, params.column_bytes)?;
 
-    let mut w = RowBlockWriter::new(
+    let mut w = RowBlockWriter::with_dialect(
         names.len(),
         params.block_bytes(),
         params.first_block_bytes(),
+        params.separator_byte(),
+        params.null_literal_bytes(),
     );
     let mut row_no = 0u64;
     loop {

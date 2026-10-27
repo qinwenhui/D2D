@@ -5,11 +5,16 @@
 //! ```text
 //! 查询： GetFlightInfo(Any(CommandStatementQuery)) → endpoints[0].ticket
 //!        DoGet(ticket) → FlightData 流（首条 IPC Schema，后续 RecordBatch）
-//! 装载： DoAction("begin_load", {table, mode, preds})   → {load_id}
+//! 装载： DoAction("begin_load", {table, mode, preds, format?}) → {load_id}
 //!        DoPut(desc{cmd: {"load_id"}}, <FlightData 流>)
 //!        DoAction("commit_load", {load_id})             → {sn, rows, files, bytes}
 //!        失败/放弃： DoAction("abort_load", {load_id})  → staging 自动清理
 //! ```
+//!
+//! 装载有两种载荷（协议 §2）：缺省 `arrow_ipc`（批流，[`Self::load_table`]）与
+//! **物理载荷** `csv`/`parquet`（[`Self::load_bytes`]，协议 §2.1）——后者把文件字节
+//! 原样切块塞进 `FlightData.data_body`，服务端 staging 落盘后整文件解码，
+//! 客户端 CPU 趋零；一次 `begin_load` 会话对应**一个文件**（多文件开多会话）。
 //!
 //! # 为什么不引 qmdb-client
 //!
@@ -277,38 +282,7 @@ impl QmdbFlight {
         mode: &LoadMode,
         watermark: Option<&Watermark>,
     ) -> D2DResult<LoadStats> {
-        // ① begin_load 领 load_id
-        let body = serde_json::json!({
-            "table": qualified_table,
-            "mode": mode.as_str(),
-            "preds": mode.preds(),
-        });
-        let load_id = {
-            let mut client = self.client()?;
-            let mut results = client
-                .do_action(Action::new(
-                    "begin_load",
-                    serde_json::to_vec(&body).map_err(|e| {
-                        D2DError::external("qmdb", format!("begin_load 编码失败: {e}"))
-                    })?,
-                ))
-                .await
-                .map_err(|e| self.flight_err("begin_load", e))?;
-            let first = results
-                .next()
-                .await
-                .transpose()
-                .map_err(|e| self.flight_err("begin_load", e))?
-                .ok_or_else(|| D2DError::external("qmdb", "begin_load 无响应"))?;
-            let resp: serde_json::Value = serde_json::from_slice(&first)
-                .map_err(|e| D2DError::external("qmdb", format!("begin_load 响应解析失败: {e}")))?;
-            resp.get("load_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .ok_or_else(|| {
-                    D2DError::external("qmdb", format!("begin_load 响应里没有 load_id: {resp}"))
-                })?
-        };
+        let load_id = self.begin_load(qualified_table, mode, None).await?;
 
         // ② do_put 直灌批流；失败务必 abort（否则等 30 分钟空闲回收）
         if let Err(e) = self.put_batches(&load_id, batches).await {
@@ -316,7 +290,79 @@ impl QmdbFlight {
             return Err(e);
         }
 
-        // ③ commit_load 拿摘要（可带水位）
+        self.commit_load(&load_id, watermark).await
+    }
+
+    /// 物理载荷装载（协议 §2.1）：begin_load(format) → do_put(文件字节) → commit_load。
+    ///
+    /// `wire` 是 `begin_load.format`（`"csv"` / `"parquet"`）；`payload` 是**一个完整
+    /// 文件**的字节 —— 协议约定一次会话对应一个文件，多文件开多会话（本仓的
+    /// 物理会话在 `sink/physical.rs` 里按块开会话）。
+    ///
+    /// 服务端 staging 落盘后整文件解码，再走与 arrow_ipc 完全相同的 coerce 通道
+    /// （按列名对齐 + 安全强转 + 动态分区路由），客户端 CPU 趋零。
+    pub async fn load_bytes(
+        &self,
+        qualified_table: &str,
+        wire: &str,
+        payload: Vec<u8>,
+        mode: &LoadMode,
+        watermark: Option<&Watermark>,
+    ) -> D2DResult<LoadStats> {
+        let load_id = self.begin_load(qualified_table, mode, Some(wire)).await?;
+        if let Err(e) = self.put_raw(&load_id, payload).await {
+            let _ = self.abort_load(&load_id).await;
+            return Err(e);
+        }
+        self.commit_load(&load_id, watermark).await
+    }
+
+    /// begin_load 领 `load_id`；`format` 为 `None` = 缺省 arrow_ipc
+    async fn begin_load(
+        &self,
+        qualified_table: &str,
+        mode: &LoadMode,
+        format: Option<&str>,
+    ) -> D2DResult<String> {
+        let mut body = serde_json::json!({
+            "table": qualified_table,
+            "mode": mode.as_str(),
+            "preds": mode.preds(),
+        });
+        if let Some(f) = format {
+            body["format"] = serde_json::json!(f);
+        }
+        let mut client = self.client()?;
+        let mut results = client
+            .do_action(Action::new(
+                "begin_load",
+                serde_json::to_vec(&body)
+                    .map_err(|e| D2DError::external("qmdb", format!("begin_load 编码失败: {e}")))?,
+            ))
+            .await
+            .map_err(|e| self.flight_err("begin_load", e))?;
+        let first = results
+            .next()
+            .await
+            .transpose()
+            .map_err(|e| self.flight_err("begin_load", e))?
+            .ok_or_else(|| D2DError::external("qmdb", "begin_load 无响应"))?;
+        let resp: serde_json::Value = serde_json::from_slice(&first)
+            .map_err(|e| D2DError::external("qmdb", format!("begin_load 响应解析失败: {e}")))?;
+        resp.get("load_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| {
+                D2DError::external("qmdb", format!("begin_load 响应里没有 load_id: {resp}"))
+            })
+    }
+
+    /// commit_load 拿摘要（可带水位）；失败先 abort
+    async fn commit_load(
+        &self,
+        load_id: &str,
+        watermark: Option<&Watermark>,
+    ) -> D2DResult<LoadStats> {
         let mut commit_body = serde_json::json!({ "load_id": load_id });
         if let Some(w) = watermark {
             commit_body["watermark"] = serde_json::json!({ "name": w.name, "value": w.value });
@@ -335,7 +381,7 @@ impl QmdbFlight {
                 })
             }
             Err(e) => {
-                let _ = self.abort_load(&load_id).await;
+                let _ = self.abort_load(load_id).await;
                 Err(e)
             }
         }
@@ -413,6 +459,64 @@ impl QmdbFlight {
             .map_err(|e| self.flight_err("do_put（装载上传）", e))?;
         while let Some(r) = results.next().await {
             r.map_err(|e| self.flight_err("do_put（装载上传）", e))?;
+        }
+        Ok(())
+    }
+
+    /// 以 load_id 为描述符上传**原始文件字节**（物理载荷，协议 §2.1）
+    ///
+    /// 线形态：首条 `FlightData` 带 descriptor + **空 Schema 的 IPC 消息**占位
+    /// （服务端流解析强制要求"首批前有 Schema 消息"，csv 模式不用它对列 ——
+    /// 列对齐走文件自带表头；实测不带会被拒"导入流缺少前置 schema 消息"，
+    /// 协议文档说的"IPC Schema 消息若有会被跳过"应更正为"必须有"）。
+    /// 后续每条 `data_header` 空、`data_body` = 文件字节切块（建议 4~8MB）。
+    ///
+    /// 切块用 [`bytes::Bytes::slice`] —— 零拷贝视图，`payload` 整体在内存里**只有一份**。
+    async fn put_raw(&self, load_id: &str, payload: Vec<u8>) -> D2DResult<()> {
+        // 协议建议 4~8MB/块，但服务端 tonic 解码上限还是缺省 4MB：4MB 块 + protobuf
+        // 帧开销（~6B）= 4,194,310 > 4,194,304，实测被拒"decoded message length too
+        // large"。降到 3.5MB 留足余量（qmdb 方调大服务端上限后再回 4~8MB）。
+        const CHUNK_BYTES: usize = 3584 * 1024;
+        let desc = FlightDescriptor {
+            r#type: arrow_flight::flight_descriptor::DescriptorType::Cmd as i32,
+            cmd: serde_json::to_vec(&serde_json::json!({ "load_id": load_id }))
+                .map_err(|e| D2DError::external("qmdb", format!("load_id 编码失败: {e}")))?
+                .into(),
+            path: vec![],
+        };
+        // 空 Schema 的 IPC Schema 消息（占位，见模块注释）
+        let placeholder_schema: arrow_flight::FlightData = {
+            use arrow::ipc::writer::IpcWriteOptions;
+            use arrow_flight::SchemaAsIpc;
+            SchemaAsIpc::new(&Schema::empty(), &IpcWriteOptions::default()).into()
+        };
+        let placeholder_header = placeholder_schema.data_header;
+        let payload = bytes::Bytes::from(payload);
+        let mut chunks = vec![arrow_flight::FlightData {
+            flight_descriptor: Some(desc),
+            data_header: placeholder_header,
+            data_body: bytes::Bytes::new(),
+            app_metadata: bytes::Bytes::new(),
+        }];
+        let mut offset = 0usize;
+        while offset < payload.len() {
+            let end = CHUNK_BYTES.min(payload.len() - offset) + offset;
+            chunks.push(arrow_flight::FlightData {
+                flight_descriptor: None,
+                data_header: bytes::Bytes::new(),
+                data_body: payload.slice(offset..end),
+                app_metadata: bytes::Bytes::new(),
+            });
+            offset = end;
+        }
+        let stream = futures::stream::iter(chunks.into_iter().map(Ok::<_, FlightError>));
+        let mut client = self.client()?;
+        let mut results = client
+            .do_put(stream)
+            .await
+            .map_err(|e| self.flight_err("do_put（物理载荷上传）", e))?;
+        while let Some(r) = results.next().await {
+            r.map_err(|e| self.flight_err("do_put（物理载荷上传）", e))?;
         }
         Ok(())
     }

@@ -13,6 +13,13 @@ use std::path::PathBuf;
 const DEFAULT_FETCH_ROWS: usize = 4000;
 /// 单列缓冲下限。实际宽度会按 `desc_column` 上报的列宽放大，见 `session::column_width`。
 const DEFAULT_COLUMN_BYTES: usize = 256;
+/// 物理直通载荷的字段分隔符（缺省 `|`，配 Doris Stream Load 的 `column_separator`）
+const DEFAULT_COLUMN_SEPARATOR: &str = "|";
+/// 物理直通载荷的 NULL 字面量（缺省 `\N`，Doris 的 null_value 口径）
+///
+/// 空串 = **NULL 输出为裸空字段** —— qmdb CSV 的约定（协议 §2.1：空字段即 NULL、
+/// 没有 NULL 字面量机制）。
+const DEFAULT_NULL_LITERAL: &str = "\\N";
 /// 稳态物理块（MB）—— 与 `flow.sink.batch_bytes` 对齐是性能关键，理由同 dmfldr
 const DEFAULT_BLOCK_MB: u32 = 64;
 /// 首块（MB）：先发一车，别等 64MB 攒满
@@ -50,6 +57,19 @@ pub struct DpiParams {
     /// 每个分片的首块大小（MB）；0 = 与 `physical_block_mb` 相同
     #[serde(default = "default_first_block_mb")]
     pub first_block_mb: u32,
+    /// 直通载荷的字段分隔符（**单字节**；缺省 `|`）
+    ///
+    /// 这是「源端产出什么」的声明，必须与目标端的解析口径一致：qmdb CSV 固定 `,`
+    /// 且不可配 → 走 qmdb 直通时在这里配 `","`。分隔符一变，值内受限字节集随之
+    /// 变（见 `format::RowBlockWriter`）。
+    #[serde(default = "default_column_separator")]
+    pub column_separator: String,
+    /// 直通载荷的 NULL 字面量；缺省 `\N`（Doris null_value 口径）
+    ///
+    /// - `\N`：NULL → 字面 `\N`，同时承诺**值里没有别的反斜杠**（`\` 进受限集）
+    /// - `""`（空串）：NULL → 裸空字段 —— qmdb CSV 的约定（目标按"空字段=NULL"解释）
+    #[serde(default = "default_null_literal")]
+    pub null_literal: String,
 }
 
 fn default_fetch_rows() -> usize {
@@ -64,6 +84,12 @@ fn default_block_mb() -> u32 {
 fn default_first_block_mb() -> u32 {
     DEFAULT_FIRST_BLOCK_MB
 }
+fn default_column_separator() -> String {
+    DEFAULT_COLUMN_SEPARATOR.to_string()
+}
+fn default_null_literal() -> String {
+    DEFAULT_NULL_LITERAL.to_string()
+}
 
 impl Default for DpiParams {
     fn default() -> Self {
@@ -74,6 +100,8 @@ impl Default for DpiParams {
             character_code: CharacterCode::Utf8,
             physical_block_mb: DEFAULT_BLOCK_MB,
             first_block_mb: DEFAULT_FIRST_BLOCK_MB,
+            column_separator: default_column_separator(),
+            null_literal: default_null_literal(),
         }
     }
 }
@@ -109,6 +137,16 @@ impl DpiParams {
         }
     }
 
+    /// 直通载荷的字段分隔符字节（validate 保证单字节）
+    pub fn separator_byte(&self) -> u8 {
+        self.column_separator.as_bytes()[0]
+    }
+
+    /// 直通载荷的 NULL 字面量；空 = NULL 输出裸空字段
+    pub fn null_literal_bytes(&self) -> &[u8] {
+        self.null_literal.as_bytes()
+    }
+
     /// 启动期校验（取值 + 互相约束）
     pub fn validate(&self) -> D2DResult<()> {
         let mut errs: Vec<String> = Vec::new();
@@ -135,6 +173,26 @@ impl DpiParams {
             errs.push(format!(
                 "first_block_mb ({}) must not exceed physical_block_mb ({})",
                 self.first_block_mb, block_mb
+            ));
+        }
+        // 方言：分隔符必须单字节；NULL 字面量不得含分隔符/换行（否则与数据无法区分）
+        if self.column_separator.len() != 1 {
+            errs.push(format!(
+                "column_separator must be a single byte, got {:?}",
+                self.column_separator
+            ));
+        }
+        let sep = self.column_separator.as_bytes().first().copied();
+        if !self.null_literal.is_empty()
+            && self
+                .null_literal
+                .as_bytes()
+                .iter()
+                .any(|b| Some(*b) == sep || *b == b'\n' || *b == b'\r' || *b == 0)
+        {
+            errs.push(format!(
+                "null_literal {:?} must not contain the separator/newline/NUL",
+                self.null_literal
             ));
         }
         if !errs.is_empty() {
@@ -266,6 +324,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("fetch_row"), "{}", err);
+    }
+
+    /// qmdb 直通方言：`,` 分隔 + 裸空字段 NULL（协议 §2.1 约定，均不可配）
+    #[test]
+    fn test_qmdb_dialect_params() {
+        let p = DpiParams::from_props(&props(json!({
+            "dpi": {"column_separator": ",", "null_literal": ""}
+        })))
+        .unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.separator_byte(), b',');
+        assert!(p.null_literal_bytes().is_empty());
+        // 缺省仍是 Doris 方言
+        let d = DpiParams::default();
+        assert_eq!(d.separator_byte(), b'|');
+        assert_eq!(d.null_literal_bytes(), b"\\N");
+    }
+
+    /// 方言校验：多字节分隔符 / NULL 字面量含分隔符都必须拒绝
+    #[test]
+    fn test_dialect_validation() {
+        let p = DpiParams::from_props(&props(json!({"dpi": {"column_separator": "||"}}))).unwrap();
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("column_separator"), "{}", err);
+
+        let p = DpiParams::from_props(&props(json!({
+            "dpi": {"column_separator": ",", "null_literal": "N,A"}
+        })))
+        .unwrap();
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("null_literal"), "{}", err);
     }
 
     #[test]
