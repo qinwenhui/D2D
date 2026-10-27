@@ -558,7 +558,9 @@ async fn physical_csv_body(flight: &QmdbFlight, table: &str) {
     assert_eq!(written, 4);
 
     // 块 2：第二个文件/会话，append 追加
-    let block2 = "5,乙,7.00,2026-10-24,2026-10-24 10:00:00\n".as_bytes().to_vec();
+    let block2 = "5,乙,7.00,2026-10-24,2026-10-24 10:00:00\n"
+        .as_bytes()
+        .to_vec();
     let written = session
         .write_block(d2d_connector::PhysicalBlock {
             bytes: block2,
