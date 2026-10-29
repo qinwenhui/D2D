@@ -397,11 +397,36 @@ impl QmdbFlight {
     // ---------- 内部 ----------
 
     async fn statement_ticket(&self, sql: &str) -> D2DResult<arrow_flight::Ticket> {
-        let info = self.flight_info(sql).await?;
-        info.endpoint
-            .first()
-            .and_then(|e| e.ticket.clone())
-            .ok_or_else(|| D2DError::external("qmdb", format!("查询 `{sql}` 无执行票据（空端点）")))
+        // 服务端并发查询上限（缺省 32）现在是"info 即咬合"：第 33 路 GetFlightInfo
+        // 直接被拒（p50 2.2ms 的干净拒绝）。读是幂等的 —— 指数退避后重新排队，
+        // 突发并发下自动等位而不是把任务打失败。
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.flight_info(sql).await {
+                Ok(info) => {
+                    return info
+                        .endpoint
+                        .first()
+                        .and_then(|e| e.ticket.clone())
+                        .ok_or_else(|| {
+                            D2DError::external("qmdb", format!("查询 `{sql}` 无执行票据（空端点）"))
+                        });
+                }
+                Err(e) if attempt < RATE_LIMIT_MAX_ATTEMPTS && is_rate_limited(&e) => {
+                    let wait = RATE_LIMIT_BACKOFF_BASE_MS * (1 << (attempt - 1));
+                    tracing::warn!(
+                        attempt,
+                        wait_ms = wait,
+                        sql = %sql,
+                        error = %e,
+                        "qmdb: 触发服务端并发查询上限，退避重试"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// GetFlightInfo：标准 FlightSQL 的"执行并拿执行计划"一步
@@ -541,6 +566,18 @@ impl QmdbFlight {
 
 fn missing(stats: &serde_json::Value, key: &str) -> D2DError {
     D2DError::external("qmdb", format!("commit_load 响应里没有 {key}: {stats}"))
+}
+
+/// 读侧限流退避：最多 5 次重试，200ms 起指数退避（0.2/0.4/0.8/1.6/3.2s，累计 ~6.2s）
+const RATE_LIMIT_MAX_ATTEMPTS: u32 = 5;
+const RATE_LIMIT_BACKOFF_BASE_MS: u64 = 200;
+
+/// 服务端并发护栏（`ResourceExhausted` 或中文原文"并发查询上限…"）—— 读幂等，可退避重试
+fn is_rate_limited(e: &D2DError) -> bool {
+    let msg = e.to_string();
+    msg.contains("并发查询上限")
+        || msg.contains("ResourceExhausted")
+        || msg.contains("Resource exhausted")
 }
 
 /// Arrow 标量 → 字符串（探测的取数口：MIN/MAX、SHOW PARTITIONS；之后统一 `Literal::parse`）
@@ -759,6 +796,29 @@ mod tests {
     use arrow::array::{Date32Array, Decimal128Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field};
     use std::sync::Arc;
+
+    /// 服务端并发咬合（"info 即咬合"，第 33 路被拒）的两种错误形态都要认；
+    /// 其他错误（认证/SQL/断流）不能触发读侧重试 —— 断流重试是执行层的职责
+    #[test]
+    fn test_rate_limited_detection() {
+        let e1 = D2DError::external(
+            "qmdb",
+            "GetFlightInfo（SELECT ...）: 并发查询上限(32)，已满，请稍后重试",
+        );
+        assert!(is_rate_limited(&e1), "{e1}");
+        let e2 = D2DError::external(
+            "qmdb",
+            "GetFlightInfo: ResourceExhausted: concurrent query limit",
+        );
+        assert!(is_rate_limited(&e2), "{e2}");
+        let e3 = D2DError::connection(
+            "qmdb",
+            "GetFlightInfo：认证失败（h:31337）—— 用户名或密码错误",
+        );
+        assert!(!is_rate_limited(&e3), "{e3}");
+        let e4 = D2DError::external("qmdb", "读查询流失败: ConnectionReset");
+        assert!(!is_rate_limited(&e4), "{e4}");
+    }
 
     #[test]
     fn test_scalar_to_string_int_and_text() {
