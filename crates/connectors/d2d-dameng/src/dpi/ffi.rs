@@ -311,7 +311,21 @@ impl DpiLibrary {
     }
 
     /// `dpi_login` —— 连接串是 `host:port`（或 dm_svc.conf 服务名）
+    ///
+    /// # 字符集行为（中文乱码的根源，读此段后再排障）
+    ///
+    /// DPI 缺省按**进程 locale** 推断客户端编码（中文 Windows=GBK、部分 Linux=GB18030），
+    /// 而本引擎发出的字节永远是 UTF-8 —— 推断错了就是静默乱码。dmfldr 不受影响
+    /// （控制文件显式 `CHARACTER_CODE=UTF-8`）。
+    ///
+    /// 显式声明的接口在当前驱动上**不可用**（2026-10-28 黑盒验证：`dpi_set_con_attr`/
+    /// `dpi_set_env_attr` 设 `DSQL_ATTR_LOCAL_CODE` 一律返回 -1，与达梦社区公开帖一致；
+    /// `dpi_login2`+`dpi_login_t.local_code` 是正路，但结构体布局需要 DPI.h）。所以：
+    /// - 运行环境必须 `LANG=xx.UTF-8`（启动自检见 `ensure_utf8_locale`）；
+    /// - 拿到 DPI.h 后改走 `dpi_login2` 显式声明（todo）。
     pub fn login(&self, con: DpiHandle, server: &str, user: &str, pwd: &str) -> D2DResult<()> {
+        ensure_utf8_locale_logged();
+
         let svr = cstr(server, "DPI 服务器地址")?;
         let usr = cstr(user, "DPI 用户名")?;
         let p = cstr(pwd, "DPI 密码")?;
@@ -742,6 +756,34 @@ pub struct ColumnDesc {
     pub size: u64,
     pub scale: i16,
     pub nullable: bool,
+}
+
+/// UTF-8 locale 自检（每进程只警告一次）：DPI 按**进程 locale** 推断客户端编码，
+/// locale 不是 UTF-8 时，引擎发出的 UTF-8 字节会被驱动按错误编码解释/转码 ——
+/// 中文静默乱码（dmfldr 不受影响，它的控制文件显式声明 CHARACTER_CODE）。
+/// 显式声明接口（DSQL_ATTR_LOCAL_CODE / dpi_login2）在当前驱动上不可用，见
+/// [`DpiLibrary::login`] 的字符集说明；所以这里只能把环境问题**提前喊出来**。
+fn ensure_utf8_locale_logged() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // LANG 优先、LC_ALL 兜底；显式空串视为未设置（继续看下一个）
+        let lang = ["LANG", "LC_ALL"]
+            .iter()
+            .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+            .unwrap_or_default();
+        let ok = lang.is_empty()
+            || lang.to_ascii_lowercase().contains("utf-8")
+            || lang.to_ascii_lowercase().contains("utf8");
+        if !ok {
+            tracing::warn!(
+                lang = %lang,
+                "dpi: 运行环境 LANG/LC_ALL 不是 UTF-8 —— DPI 会按该 locale 解释客户端字节，\
+                 中文很可能乱码（dmfldr 正常、dpi 乱即此症状）。\
+                 处理：export LANG=zh_CN.UTF-8 后重跑；根治需 DPI 显式声明编码（待达梦 DPI.h）"
+            );
+        }
+    });
 }
 
 fn cstr(s: &str, what: &str) -> D2DResult<CString> {
